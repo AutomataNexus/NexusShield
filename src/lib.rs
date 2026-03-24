@@ -27,6 +27,7 @@
 pub mod audit_chain;
 pub mod config;
 pub mod credential_vault;
+pub mod endpoint;
 pub mod fingerprint;
 pub mod quarantine;
 pub mod rate_governor;
@@ -81,6 +82,15 @@ pub enum ShieldError {
 
     #[error("Email rate limit exceeded for {0}")]
     EmailBombing(String),
+
+    #[error("Malware detected: {0}")]
+    MalwareDetected(String),
+
+    #[error("Endpoint protection error: {0}")]
+    EndpointError(String),
+
+    #[error("Quarantine vault error: {0}")]
+    QuarantineVaultError(String),
 }
 
 impl IntoResponse for ShieldError {
@@ -115,6 +125,15 @@ impl IntoResponse for ShieldError {
             Self::EmailBombing(_) => {
                 (StatusCode::TOO_MANY_REQUESTS, "Email rate limit exceeded")
             }
+            Self::MalwareDetected(_) => {
+                (StatusCode::FORBIDDEN, "Request blocked by security policy")
+            }
+            Self::EndpointError(_) => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "Security engine error")
+            }
+            Self::QuarantineVaultError(_) => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "Security engine error")
+            }
         };
         (status, message).into_response()
     }
@@ -127,6 +146,7 @@ pub struct Shield {
     pub rate_governor: Arc<rate_governor::RateGovernor>,
     pub fingerprinter: Arc<fingerprint::Fingerprinter>,
     pub email_limiter: Arc<EmailRateLimiter>,
+    pub endpoint: Option<Arc<endpoint::EndpointEngine>>,
 }
 
 impl Shield {
@@ -141,6 +161,7 @@ impl Shield {
             rate_governor,
             fingerprinter,
             email_limiter,
+            endpoint: None,
         }
     }
 

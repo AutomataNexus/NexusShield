@@ -1,11 +1,11 @@
 [package]
 name = "nexus-shield"
-version = "0.1.0"
+version = "0.3.0"
 edition = "2021"
 rust-version = "1.75"
 authors = ["Andrew Jewell Sr. - AutomataNexus"]
 license = "MIT"
-description = "Adaptive zero-trust security engine for the Nexus platform — SQL firewall, SSRF guard, behavioral fingerprinting, tamper-evident audit chain"
+description = "Adaptive zero-trust security gateway with real-time endpoint protection — SQL firewall, SSRF guard, malware detection, process monitoring, network analysis, rootkit detection"
 
 [dependencies]
 # SQL parsing for injection detection (AST-level analysis, not regex)
@@ -60,6 +60,24 @@ toml = "0.8"
 
 # CLI
 clap = { version = "4", features = ["derive"] }
+
+# Endpoint protection: filesystem monitoring (inotify on Linux)
+notify = "7"
+
+# Endpoint protection: /proc process info
+procfs = "0.17"
+
+# Endpoint protection: async trait for Scanner interface
+async-trait = "0.1"
+
+# Endpoint protection: signal handling (kill processes)
+nix = { version = "0.29", features = ["signal", "process", "user"] }
+
+# Endpoint protection: glob pattern matching for allowlists
+glob = "0.3"
+
+# Endpoint protection: regex for pattern detection
+regex = "1"
 
 [[bin]]
 name = "nexus-shield"

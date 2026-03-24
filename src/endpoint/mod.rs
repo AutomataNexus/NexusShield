@@ -1,0 +1,627 @@
+// ============================================================================
+// File: endpoint/mod.rs
+// Description: Real-time endpoint protection engine — core types and orchestrator
+// Author: Andrew Jewell Sr. - AutomataNexus
+// Updated: March 24, 2026
+// ============================================================================
+//! # Endpoint Protection Engine
+//!
+//! Real-time file, process, network, and memory monitoring with multi-engine
+//! malware detection. Developer-aware allowlisting eliminates false positives
+//! on dev machines.
+
+pub mod allowlist;
+pub mod file_quarantine;
+pub mod heuristics;
+pub mod memory_scanner;
+pub mod network_monitor;
+pub mod process_monitor;
+pub mod rootkit_detector;
+pub mod signatures;
+pub mod threat_intel;
+pub mod watcher;
+pub mod yara_engine;
+
+use chrono::{DateTime, Utc};
+use parking_lot::RwLock;
+use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
+
+use crate::audit_chain::{AuditChain, SecurityEventType};
+
+// =============================================================================
+// Severity
+// =============================================================================
+
+/// Detection severity levels, ordered from lowest to highest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum Severity {
+    Info,
+    Low,
+    Medium,
+    High,
+    Critical,
+}
+
+impl std::fmt::Display for Severity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Info => write!(f, "info"),
+            Self::Low => write!(f, "low"),
+            Self::Medium => write!(f, "medium"),
+            Self::High => write!(f, "high"),
+            Self::Critical => write!(f, "critical"),
+        }
+    }
+}
+
+// =============================================================================
+// Detection Category
+// =============================================================================
+
+/// Category of a detection, carrying module-specific metadata.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum DetectionCategory {
+    MalwareSignature { name: String, family: String },
+    HeuristicAnomaly { rule: String },
+    SuspiciousProcess { pid: u32, name: String },
+    NetworkAnomaly { connection: String },
+    MemoryAnomaly { pid: u32, region: String },
+    RootkitIndicator { technique: String },
+    YaraMatch { rule_name: String, tags: Vec<String> },
+    FilelessMalware { technique: String },
+}
+
+// =============================================================================
+// Recommended Action
+// =============================================================================
+
+/// Action the engine recommends after a detection.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum RecommendedAction {
+    LogOnly,
+    Alert,
+    Quarantine { source_path: PathBuf },
+    KillProcess { pid: u32 },
+    BlockConnection { addr: String },
+    Multi(Vec<RecommendedAction>),
+}
+
+impl std::fmt::Display for RecommendedAction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::LogOnly => write!(f, "log_only"),
+            Self::Alert => write!(f, "alert"),
+            Self::Quarantine { source_path } => {
+                write!(f, "quarantine({})", source_path.display())
+            }
+            Self::KillProcess { pid } => write!(f, "kill({})", pid),
+            Self::BlockConnection { addr } => write!(f, "block({})", addr),
+            Self::Multi(actions) => {
+                let names: Vec<String> = actions.iter().map(|a| a.to_string()).collect();
+                write!(f, "multi[{}]", names.join(", "))
+            }
+        }
+    }
+}
+
+// =============================================================================
+// Scan Result
+// =============================================================================
+
+/// Unified result returned by every scanner engine.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScanResult {
+    /// Unique detection ID.
+    pub id: String,
+    /// When the detection occurred.
+    pub timestamp: DateTime<Utc>,
+    /// Which scanner produced this result.
+    pub scanner: String,
+    /// What was scanned (file path, PID, connection, etc.).
+    pub target: String,
+    /// Severity of the detection.
+    pub severity: Severity,
+    /// Category with detection-specific metadata.
+    pub category: DetectionCategory,
+    /// Human-readable description.
+    pub description: String,
+    /// Confidence score 0.0–1.0.
+    pub confidence: f64,
+    /// Recommended action.
+    pub action: RecommendedAction,
+    /// SHA-256 of the scanned artifact (if applicable).
+    pub artifact_hash: Option<String>,
+}
+
+impl ScanResult {
+    /// Create a new ScanResult with auto-generated ID and timestamp.
+    pub fn new(
+        scanner: impl Into<String>,
+        target: impl Into<String>,
+        severity: Severity,
+        category: DetectionCategory,
+        description: impl Into<String>,
+        confidence: f64,
+        action: RecommendedAction,
+    ) -> Self {
+        Self {
+            id: uuid::Uuid::new_v4().to_string(),
+            timestamp: Utc::now(),
+            scanner: scanner.into(),
+            target: target.into(),
+            severity,
+            category,
+            description: description.into(),
+            confidence: confidence.clamp(0.0, 1.0),
+            action,
+            artifact_hash: None,
+        }
+    }
+
+    /// Attach an artifact hash to this result.
+    pub fn with_hash(mut self, hash: String) -> Self {
+        self.artifact_hash = Some(hash);
+        self
+    }
+}
+
+// =============================================================================
+// Scanner Trait
+// =============================================================================
+
+/// Trait that all scanning engines implement.
+#[async_trait::async_trait]
+pub trait Scanner: Send + Sync {
+    /// Human-readable name of this scanner.
+    fn name(&self) -> &str;
+
+    /// Whether this scanner is currently enabled and operational.
+    fn is_active(&self) -> bool;
+
+    /// Scan a file on disk. Returns empty vec if clean.
+    async fn scan_file(&self, path: &Path) -> Vec<ScanResult>;
+
+    /// Scan raw bytes (for in-memory content). Default: no-op.
+    async fn scan_bytes(&self, _data: &[u8], _label: &str) -> Vec<ScanResult> {
+        Vec::new()
+    }
+
+    /// Scan a running process by PID. Default: no-op.
+    async fn scan_process(&self, _pid: u32) -> Vec<ScanResult> {
+        Vec::new()
+    }
+}
+
+// =============================================================================
+// Endpoint Configuration
+// =============================================================================
+
+/// Top-level configuration for the endpoint protection engine.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EndpointConfig {
+    pub enabled: bool,
+    pub enable_watcher: bool,
+    pub enable_process_monitor: bool,
+    pub enable_network_monitor: bool,
+    pub enable_memory_scanner: bool,
+    pub enable_rootkit_detector: bool,
+    pub data_dir: PathBuf,
+    pub watcher: watcher::WatcherConfig,
+    pub process_monitor: process_monitor::ProcessMonitorConfig,
+    pub network_monitor: network_monitor::NetworkMonitorConfig,
+    pub memory_scanner: memory_scanner::MemoryScanConfig,
+    pub rootkit_detector: rootkit_detector::RootkitConfig,
+    pub heuristics: heuristics::HeuristicConfig,
+    pub quarantine: file_quarantine::QuarantineVaultConfig,
+    pub allowlist: allowlist::AllowlistConfig,
+    pub threat_intel: threat_intel::ThreatIntelConfig,
+    pub signatures: signatures::SignatureConfig,
+}
+
+impl Default for EndpointConfig {
+    fn default() -> Self {
+        let data_dir = dirs_or_default();
+        Self {
+            enabled: true,
+            enable_watcher: true,
+            enable_process_monitor: true,
+            enable_network_monitor: true,
+            enable_memory_scanner: false, // requires elevated privileges
+            enable_rootkit_detector: false, // requires root
+            data_dir: data_dir.clone(),
+            watcher: watcher::WatcherConfig::default(),
+            process_monitor: process_monitor::ProcessMonitorConfig::default(),
+            network_monitor: network_monitor::NetworkMonitorConfig::default(),
+            memory_scanner: memory_scanner::MemoryScanConfig::default(),
+            rootkit_detector: rootkit_detector::RootkitConfig::new(data_dir.clone()),
+            heuristics: heuristics::HeuristicConfig::default(),
+            quarantine: file_quarantine::QuarantineVaultConfig::new(data_dir.join("quarantine")),
+            allowlist: allowlist::AllowlistConfig::default(),
+            threat_intel: threat_intel::ThreatIntelConfig::new(data_dir.join("threat-intel")),
+            signatures: signatures::SignatureConfig::new(data_dir.join("signatures.ndjson")),
+        }
+    }
+}
+
+fn dirs_or_default() -> PathBuf {
+    std::env::var("HOME")
+        .map(|h| PathBuf::from(h).join(".nexus-shield"))
+        .unwrap_or_else(|_| PathBuf::from("/tmp/nexus-shield"))
+}
+
+// =============================================================================
+// Endpoint Stats
+// =============================================================================
+
+/// Runtime statistics for the endpoint protection engine.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EndpointStats {
+    pub total_files_scanned: u64,
+    pub total_threats_detected: u64,
+    pub active_monitors: Vec<String>,
+    pub quarantined_files: usize,
+    pub last_scan_time: Option<DateTime<Utc>>,
+    pub scanners_active: Vec<String>,
+}
+
+// =============================================================================
+// Endpoint Engine
+// =============================================================================
+
+/// Orchestrates all endpoint protection subsystems.
+pub struct EndpointEngine {
+    /// All registered scanning engines.
+    scanners: Vec<Arc<dyn Scanner>>,
+    /// Developer-aware allowlist.
+    pub allowlist: Arc<allowlist::DeveloperAllowlist>,
+    /// Threat intelligence database.
+    pub threat_intel: Arc<threat_intel::ThreatIntelDB>,
+    /// File quarantine vault.
+    pub quarantine: Arc<file_quarantine::QuarantineVault>,
+    /// Broadcast channel for real-time scan results.
+    result_tx: tokio::sync::broadcast::Sender<ScanResult>,
+    /// Detection history (ring buffer).
+    history: Arc<RwLock<VecDeque<ScanResult>>>,
+    /// Configuration.
+    config: EndpointConfig,
+    /// Counters.
+    files_scanned: AtomicU64,
+    threats_detected: AtomicU64,
+    /// Whether the engine is running.
+    running: AtomicBool,
+}
+
+impl EndpointEngine {
+    /// Create a new endpoint engine with the given configuration.
+    pub fn new(config: EndpointConfig) -> Self {
+        let (result_tx, _) = tokio::sync::broadcast::channel(1024);
+
+        // Initialize subsystems
+        let allowlist = Arc::new(allowlist::DeveloperAllowlist::new(config.allowlist.clone()));
+        let threat_intel = Arc::new(threat_intel::ThreatIntelDB::new(config.threat_intel.clone()));
+        let quarantine = Arc::new(file_quarantine::QuarantineVault::new(config.quarantine.clone()));
+
+        // Build scanner list
+        let mut scanners: Vec<Arc<dyn Scanner>> = Vec::new();
+
+        // Signature engine
+        let sig_engine = signatures::SignatureEngine::new(config.signatures.clone());
+        scanners.push(Arc::new(sig_engine));
+
+        // Heuristic engine
+        let heur_engine = heuristics::HeuristicEngine::new(config.heuristics.clone());
+        scanners.push(Arc::new(heur_engine));
+
+        // YARA engine
+        let yara = yara_engine::YaraEngine::new(None);
+        scanners.push(Arc::new(yara));
+
+        Self {
+            scanners,
+            allowlist,
+            threat_intel,
+            quarantine,
+            result_tx,
+            history: Arc::new(RwLock::new(VecDeque::with_capacity(10000))),
+            config,
+            files_scanned: AtomicU64::new(0),
+            threats_detected: AtomicU64::new(0),
+            running: AtomicBool::new(false),
+        }
+    }
+
+    /// Start all background monitors. Returns JoinHandles for spawned tasks.
+    pub async fn start(&self, audit: Arc<AuditChain>) -> Vec<tokio::task::JoinHandle<()>> {
+        self.running.store(true, Ordering::SeqCst);
+        let mut handles = Vec::new();
+
+        // Record startup event
+        audit.record(
+            SecurityEventType::EndpointScanStarted,
+            "system",
+            "Endpoint protection engine started",
+            0.0,
+        );
+
+        // Start file watcher
+        if self.config.enable_watcher {
+            let (scan_tx, mut scan_rx) = tokio::sync::mpsc::unbounded_channel::<PathBuf>();
+            let watcher_handle = watcher::FileWatcher::new(
+                self.config.watcher.clone(),
+                scan_tx,
+            );
+
+            let allowlist = Arc::clone(&self.allowlist);
+            let _watcher_task = watcher_handle.start(allowlist);
+
+            // File scan consumer task
+            let scanners = self.scanners.clone();
+            let result_tx = self.result_tx.clone();
+            let history = Arc::clone(&self.history);
+            let quarantine = Arc::clone(&self.quarantine);
+            let audit2 = Arc::clone(&audit);
+            let files_scanned = &self.files_scanned as *const AtomicU64 as usize;
+            let threats_detected = &self.threats_detected as *const AtomicU64 as usize;
+
+            let handle = tokio::spawn(async move {
+                while let Some(path) = scan_rx.recv().await {
+                    // Run all scanners on the file
+                    let mut all_results = Vec::new();
+                    for scanner in &scanners {
+                        if scanner.is_active() {
+                            let results = scanner.scan_file(&path).await;
+                            all_results.extend(results);
+                        }
+                    }
+
+                    // SAFETY: These are effectively &'static since EndpointEngine outlives tasks
+                    unsafe {
+                        (*(files_scanned as *const AtomicU64)).fetch_add(1, Ordering::Relaxed);
+                    }
+
+                    // Process results
+                    for result in all_results {
+                        unsafe {
+                            (*(threats_detected as *const AtomicU64)).fetch_add(1, Ordering::Relaxed);
+                        }
+
+                        // Quarantine if needed
+                        if let RecommendedAction::Quarantine { ref source_path } = result.action {
+                            let _ = quarantine.quarantine_file(
+                                source_path,
+                                &result.description,
+                                &result.scanner,
+                                result.severity,
+                            );
+                        }
+
+                        // Record to audit chain
+                        audit2.record(
+                            SecurityEventType::MalwareDetected,
+                            &result.target,
+                            &result.description,
+                            result.confidence,
+                        );
+
+                        // Broadcast and save to history
+                        let _ = result_tx.send(result.clone());
+                        let mut hist = history.write();
+                        if hist.len() >= 10000 {
+                            hist.pop_front();
+                        }
+                        hist.push_back(result);
+                    }
+                }
+            });
+            handles.push(handle);
+        }
+
+        handles
+    }
+
+    /// Scan a single file with all engines.
+    pub async fn scan_file(&self, path: &Path) -> Vec<ScanResult> {
+        if self.allowlist.should_skip_path(path) {
+            return Vec::new();
+        }
+
+        self.files_scanned.fetch_add(1, Ordering::Relaxed);
+        let mut results = Vec::new();
+
+        for scanner in &self.scanners {
+            if scanner.is_active() {
+                let mut r = scanner.scan_file(path).await;
+                results.append(&mut r);
+            }
+        }
+
+        if !results.is_empty() {
+            self.threats_detected
+                .fetch_add(results.len() as u64, Ordering::Relaxed);
+            let mut hist = self.history.write();
+            for r in &results {
+                if hist.len() >= 10000 {
+                    hist.pop_front();
+                }
+                hist.push_back(r.clone());
+            }
+        }
+
+        results
+    }
+
+    /// Scan a directory recursively.
+    pub async fn scan_dir(&self, dir: &Path) -> Vec<ScanResult> {
+        let mut results = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    if !self.allowlist.should_skip_path(&path) {
+                        let mut r = Box::pin(self.scan_dir(&path)).await;
+                        results.append(&mut r);
+                    }
+                } else if path.is_file() {
+                    let mut r = self.scan_file(&path).await;
+                    results.append(&mut r);
+                }
+            }
+        }
+        results
+    }
+
+    /// Subscribe to real-time scan results.
+    pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<ScanResult> {
+        self.result_tx.subscribe()
+    }
+
+    /// Get recent detection history.
+    pub fn recent_detections(&self, count: usize) -> Vec<ScanResult> {
+        let hist = self.history.read();
+        hist.iter().rev().take(count).cloned().collect()
+    }
+
+    /// Get runtime statistics.
+    pub fn stats(&self) -> EndpointStats {
+        let mut active = Vec::new();
+        if self.config.enable_watcher {
+            active.push("file_watcher".to_string());
+        }
+        if self.config.enable_process_monitor {
+            active.push("process_monitor".to_string());
+        }
+        if self.config.enable_network_monitor {
+            active.push("network_monitor".to_string());
+        }
+        if self.config.enable_memory_scanner {
+            active.push("memory_scanner".to_string());
+        }
+        if self.config.enable_rootkit_detector {
+            active.push("rootkit_detector".to_string());
+        }
+
+        let scanner_names: Vec<String> = self
+            .scanners
+            .iter()
+            .filter(|s| s.is_active())
+            .map(|s| s.name().to_string())
+            .collect();
+
+        EndpointStats {
+            total_files_scanned: self.files_scanned.load(Ordering::Relaxed),
+            total_threats_detected: self.threats_detected.load(Ordering::Relaxed),
+            active_monitors: active,
+            quarantined_files: self.quarantine.list_entries().len(),
+            last_scan_time: self.history.read().back().map(|r| r.timestamp),
+            scanners_active: scanner_names,
+        }
+    }
+
+    /// Check if the engine is running.
+    pub fn is_running(&self) -> bool {
+        self.running.load(Ordering::SeqCst)
+    }
+}
+
+// =============================================================================
+// Tests
+// =============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_severity_ordering() {
+        assert!(Severity::Info < Severity::Low);
+        assert!(Severity::Low < Severity::Medium);
+        assert!(Severity::Medium < Severity::High);
+        assert!(Severity::High < Severity::Critical);
+    }
+
+    #[test]
+    fn test_severity_display() {
+        assert_eq!(Severity::Critical.to_string(), "critical");
+        assert_eq!(Severity::Info.to_string(), "info");
+    }
+
+    #[test]
+    fn test_scan_result_creation() {
+        let result = ScanResult::new(
+            "test_scanner",
+            "/tmp/malware.exe",
+            Severity::High,
+            DetectionCategory::MalwareSignature {
+                name: "EICAR".to_string(),
+                family: "Test".to_string(),
+            },
+            "EICAR test file detected",
+            0.99,
+            RecommendedAction::Quarantine {
+                source_path: PathBuf::from("/tmp/malware.exe"),
+            },
+        );
+        assert!(!result.id.is_empty());
+        assert_eq!(result.scanner, "test_scanner");
+        assert_eq!(result.severity, Severity::High);
+        assert_eq!(result.confidence, 0.99);
+    }
+
+    #[test]
+    fn test_scan_result_with_hash() {
+        let result = ScanResult::new(
+            "sig",
+            "/tmp/test",
+            Severity::Low,
+            DetectionCategory::HeuristicAnomaly {
+                rule: "test".to_string(),
+            },
+            "test",
+            0.5,
+            RecommendedAction::LogOnly,
+        )
+        .with_hash("abc123".to_string());
+        assert_eq!(result.artifact_hash, Some("abc123".to_string()));
+    }
+
+    #[test]
+    fn test_confidence_clamping() {
+        let r1 = ScanResult::new(
+            "s", "t", Severity::Low,
+            DetectionCategory::HeuristicAnomaly { rule: "x".into() },
+            "d", 1.5, RecommendedAction::LogOnly,
+        );
+        assert_eq!(r1.confidence, 1.0);
+
+        let r2 = ScanResult::new(
+            "s", "t", Severity::Low,
+            DetectionCategory::HeuristicAnomaly { rule: "x".into() },
+            "d", -0.5, RecommendedAction::LogOnly,
+        );
+        assert_eq!(r2.confidence, 0.0);
+    }
+
+    #[test]
+    fn test_recommended_action_display() {
+        assert_eq!(RecommendedAction::LogOnly.to_string(), "log_only");
+        assert_eq!(RecommendedAction::Alert.to_string(), "alert");
+        assert_eq!(
+            RecommendedAction::KillProcess { pid: 1234 }.to_string(),
+            "kill(1234)"
+        );
+    }
+
+    #[test]
+    fn test_endpoint_config_default() {
+        let config = EndpointConfig::default();
+        assert!(config.enabled);
+        assert!(config.enable_watcher);
+        assert!(config.enable_process_monitor);
+        assert!(!config.enable_memory_scanner); // requires elevated
+        assert!(!config.enable_rootkit_detector); // requires root
+    }
+}

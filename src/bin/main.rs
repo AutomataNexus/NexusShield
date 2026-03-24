@@ -26,6 +26,7 @@ use tracing_subscriber::{EnvFilter, fmt};
 use nexus_shield::{
     Shield, ShieldConfig, shield_middleware,
     audit_chain::SecurityEventType,
+    endpoint::{EndpointConfig, EndpointEngine},
 };
 
 #[derive(Parser, Debug)]
@@ -58,6 +59,22 @@ struct Args {
     /// Enable standalone mode (no upstream, just shield + status)
     #[arg(long, default_value = "false")]
     standalone: bool,
+
+    /// Enable real-time endpoint protection (file/process/network monitoring)
+    #[arg(long, default_value = "false")]
+    endpoint: bool,
+
+    /// Run a one-time full scan of a directory
+    #[arg(long)]
+    scan: Option<String>,
+
+    /// Scan a single file
+    #[arg(long)]
+    scan_file: Option<String>,
+
+    /// Endpoint data directory
+    #[arg(long, default_value = "~/.nexus-shield")]
+    endpoint_data_dir: String,
 }
 
 #[tokio::main]
@@ -77,8 +94,9 @@ async fn main() {
     tracing::info!(
         r#"
     ╔══════════════════════════════════════════════╗
-    ║            NexusShield v0.1.0                ║
+    ║            NexusShield v0.3.0                ║
     ║     Adaptive Zero-Trust Security Gateway     ║
+    ║      + Real-Time Endpoint Protection         ║
     ║          AutomataNexus Engineering            ║
     ╚══════════════════════════════════════════════╝
     "#
@@ -90,7 +108,64 @@ async fn main() {
     config.warn_threshold = args.warn_threshold;
     config.rate.requests_per_second = args.rps;
 
-    let shield = Arc::new(Shield::new(config));
+    let mut shield = Shield::new(config);
+
+    // Initialize endpoint protection if requested
+    let endpoint_engine: Option<Arc<EndpointEngine>> = if args.endpoint
+        || args.scan.is_some()
+        || args.scan_file.is_some()
+    {
+        let ep_config = EndpointConfig::default();
+        let engine = Arc::new(EndpointEngine::new(ep_config));
+        shield.endpoint = Some(engine.clone());
+        Some(engine)
+    } else {
+        None
+    };
+
+    // Handle one-shot scan commands
+    if let Some(ref file_path) = args.scan_file {
+        let engine = endpoint_engine.as_ref().expect("Endpoint engine required");
+        let path = std::path::Path::new(file_path);
+        tracing::info!("Scanning file: {}", path.display());
+        let results = engine.scan_file(path).await;
+        if results.is_empty() {
+            println!("CLEAN: No threats detected in {}", path.display());
+        } else {
+            println!("THREATS FOUND in {}:", path.display());
+            for r in &results {
+                println!(
+                    "  [{:?}] {} (confidence: {:.0}%) — {}",
+                    r.severity,
+                    r.scanner,
+                    r.confidence * 100.0,
+                    r.description
+                );
+            }
+        }
+        std::process::exit(if results.is_empty() { 0 } else { 1 });
+    }
+
+    if let Some(ref dir_path) = args.scan {
+        let engine = endpoint_engine.as_ref().expect("Endpoint engine required");
+        let path = std::path::Path::new(dir_path);
+        tracing::info!("Scanning directory: {}", path.display());
+        let results = engine.scan_dir(path).await;
+        if results.is_empty() {
+            println!("CLEAN: No threats detected in {}", path.display());
+        } else {
+            println!("THREATS FOUND ({} detections):", results.len());
+            for r in &results {
+                println!(
+                    "  [{:?}] {} — {} ({})",
+                    r.severity, r.target, r.description, r.scanner
+                );
+            }
+        }
+        std::process::exit(if results.is_empty() { 0 } else { 1 });
+    }
+
+    let shield = Arc::new(shield);
 
     // Clone for background tasks
     let shield_bg = shield.clone();
@@ -107,15 +182,56 @@ async fn main() {
         }
     });
 
+    // Start endpoint protection monitors if enabled
+    if let Some(ref engine) = endpoint_engine {
+        if args.endpoint {
+            let handles = engine.start(shield.audit.clone()).await;
+            tracing::info!(
+                monitors = handles.len(),
+                "Endpoint protection started"
+            );
+        }
+    }
+
     // Clone for audit export
     let shield_status = shield.clone();
     let shield_audit = shield.clone();
     let shield_stats = shield.clone();
+    let endpoint_for_routes = endpoint_engine.clone();
+
+    // Build endpoint routes if enabled
+    let endpoint_routes = if let Some(engine) = endpoint_for_routes {
+        let ep1 = engine.clone();
+        let ep2 = engine.clone();
+        let ep3 = engine.clone();
+        let ep4 = engine.clone();
+        Some(
+            Router::new()
+                .route("/endpoint/status", get(move || {
+                    let e = ep1.clone();
+                    async move { endpoint_status_handler(e).await }
+                }))
+                .route("/endpoint/detections", get(move || {
+                    let e = ep2.clone();
+                    async move { endpoint_detections_handler(e).await }
+                }))
+                .route("/endpoint/quarantine", get(move || {
+                    let e = ep3.clone();
+                    async move { endpoint_quarantine_handler(e).await }
+                }))
+                .route("/endpoint/scan", axum::routing::post(move |body: String| {
+                    let e = ep4.clone();
+                    async move { endpoint_scan_handler(e, body).await }
+                }))
+        )
+    } else {
+        None
+    };
 
     let app = if args.standalone || args.upstream.is_none() {
         // Standalone mode: shield + status endpoints
         tracing::info!("Running in standalone mode (no upstream proxy)");
-        Router::new()
+        let mut router = Router::new()
             .route("/health", get(|| async { "NexusShield OK" }))
             .route("/dashboard", get(dashboard_handler))
             .route("/logo.png", get(logo_handler))
@@ -127,7 +243,13 @@ async fn main() {
             }))
             .route("/stats", get(move || async move {
                 stats_handler(shield_stats.clone()).await
-            }))
+            }));
+
+        if let Some(ep_routes) = endpoint_routes {
+            router = router.merge(ep_routes);
+        }
+
+        router
             .fallback(|| async {
                 (StatusCode::OK, "NexusShield: request inspected and allowed")
             })
@@ -235,7 +357,7 @@ async fn status_handler(shield: Arc<Shield>) -> impl IntoResponse {
 
     let status = serde_json::json!({
         "service": "NexusShield",
-        "version": "0.1.0",
+        "version": "0.3.0",
         "status": "active",
         "config": {
             "block_threshold": shield.config.block_threshold,
@@ -306,4 +428,99 @@ async fn stats_handler(shield: Arc<Shield>) -> impl IntoResponse {
     });
 
     (StatusCode::OK, axum::Json(stats))
+}
+
+// =============================================================================
+// Endpoint Protection API Handlers
+// =============================================================================
+
+async fn endpoint_status_handler(engine: Arc<EndpointEngine>) -> impl IntoResponse {
+    let stats = engine.stats();
+    (StatusCode::OK, axum::Json(serde_json::json!({
+        "endpoint_protection": "active",
+        "total_files_scanned": stats.total_files_scanned,
+        "total_threats_detected": stats.total_threats_detected,
+        "active_monitors": stats.active_monitors,
+        "scanners_active": stats.scanners_active,
+        "quarantined_files": stats.quarantined_files,
+        "last_scan_time": stats.last_scan_time.map(|t| t.to_rfc3339()),
+    })))
+}
+
+async fn endpoint_detections_handler(engine: Arc<EndpointEngine>) -> impl IntoResponse {
+    let detections = engine.recent_detections(100);
+    let events: Vec<serde_json::Value> = detections.iter().map(|d| {
+        serde_json::json!({
+            "id": d.id,
+            "timestamp": d.timestamp.to_rfc3339(),
+            "scanner": d.scanner,
+            "target": d.target,
+            "severity": format!("{}", d.severity),
+            "description": d.description,
+            "confidence": d.confidence,
+            "action": format!("{}", d.action),
+            "artifact_hash": d.artifact_hash,
+        })
+    }).collect();
+
+    (StatusCode::OK, axum::Json(serde_json::json!({
+        "detections": events,
+        "total": detections.len(),
+    })))
+}
+
+async fn endpoint_quarantine_handler(engine: Arc<EndpointEngine>) -> impl IntoResponse {
+    let entries = engine.quarantine.list_entries();
+    let items: Vec<serde_json::Value> = entries.iter().map(|e| {
+        serde_json::json!({
+            "id": e.id,
+            "original_path": e.original_path.to_string_lossy(),
+            "sha256": e.sha256,
+            "detection_reason": e.detection_reason,
+            "scanner": e.scanner,
+            "severity": format!("{}", e.severity),
+            "quarantined_at": e.quarantined_at.to_rfc3339(),
+            "file_size": e.file_size,
+        })
+    }).collect();
+
+    (StatusCode::OK, axum::Json(serde_json::json!({
+        "quarantined_files": items,
+        "total": entries.len(),
+        "vault_size_bytes": engine.quarantine.vault_size(),
+    })))
+}
+
+async fn endpoint_scan_handler(engine: Arc<EndpointEngine>, body: String) -> impl IntoResponse {
+    let path = std::path::Path::new(body.trim());
+    if !path.exists() {
+        return (StatusCode::BAD_REQUEST, axum::Json(serde_json::json!({
+            "error": "Path does not exist",
+            "path": body.trim(),
+        })));
+    }
+
+    let results = if path.is_dir() {
+        engine.scan_dir(path).await
+    } else {
+        engine.scan_file(path).await
+    };
+
+    let detections: Vec<serde_json::Value> = results.iter().map(|r| {
+        serde_json::json!({
+            "scanner": r.scanner,
+            "target": r.target,
+            "severity": format!("{}", r.severity),
+            "description": r.description,
+            "confidence": r.confidence,
+            "artifact_hash": r.artifact_hash,
+        })
+    }).collect();
+
+    (StatusCode::OK, axum::Json(serde_json::json!({
+        "path": body.trim(),
+        "clean": results.is_empty(),
+        "threats_found": results.len(),
+        "detections": detections,
+    })))
 }

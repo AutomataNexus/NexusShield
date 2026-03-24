@@ -33,6 +33,17 @@ pub enum SecurityEventType {
     BanIssued,
     BanLifted,
     ChainVerified,
+    // Endpoint protection events
+    MalwareDetected,
+    SuspiciousProcess,
+    SuspiciousNetwork,
+    MemoryAnomaly,
+    RootkitIndicator,
+    FileQuarantined,
+    FileRestored,
+    SignatureDbUpdated,
+    EndpointScanStarted,
+    EndpointScanCompleted,
 }
 
 /// A single event in the hash-chained audit log.
