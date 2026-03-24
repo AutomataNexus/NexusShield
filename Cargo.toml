@@ -1,0 +1,69 @@
+[package]
+name = "nexus-shield"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+authors = ["Andrew Jewell Sr. - AutomataNexus"]
+license = "MIT"
+description = "Adaptive zero-trust security engine for the Nexus platform — SQL firewall, SSRF guard, behavioral fingerprinting, tamper-evident audit chain"
+
+[dependencies]
+# SQL parsing for injection detection (AST-level analysis, not regex)
+sqlparser = "0.41"
+
+# Cryptographic hashing for audit chain + fingerprinting
+sha2 = "0.10"
+hex = "0.4"
+
+# Fast synchronization (no lock poisoning)
+parking_lot = "0.12"
+
+# URL parsing for SSRF guard
+url = "2"
+
+# Credential encryption (AES-256-GCM)
+aes-gcm = "0.10"
+rand = "0.8"
+base64 = "0.22"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Time handling
+chrono = { version = "0.4", features = ["serde"] }
+
+# Unique IDs
+uuid = { version = "1", features = ["v4"] }
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Error handling
+thiserror = "2"
+
+# Web framework
+axum = "0.7"
+
+# HTTP client for reverse proxy
+hyper = { version = "1", features = ["full"] }
+hyper-util = { version = "0.1", features = ["client-legacy", "tokio"] }
+http-body-util = "0.1"
+tower = { version = "0.5", features = ["util"] }
+
+# Config file
+toml = "0.8"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+[[bin]]
+name = "nexus-shield"
+path = "src/bin/main.rs"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
