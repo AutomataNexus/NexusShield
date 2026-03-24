@@ -12,7 +12,7 @@ use axum::{
     Extension,
     extract::Request,
     middleware,
-    response::{IntoResponse, Response},
+    response::{IntoResponse, Response, Html},
     http::StatusCode,
     routing::get,
 };
@@ -117,6 +117,8 @@ async fn main() {
         tracing::info!("Running in standalone mode (no upstream proxy)");
         Router::new()
             .route("/health", get(|| async { "NexusShield OK" }))
+            .route("/dashboard", get(dashboard_handler))
+            .route("/logo.png", get(logo_handler))
             .route("/status", get(move || async move {
                 status_handler(shield_status.clone()).await
             }))
@@ -144,6 +146,8 @@ async fn main() {
 
         Router::new()
             .route("/health", get(|| async { "NexusShield OK" }))
+            .route("/dashboard", get(dashboard_handler))
+            .route("/logo.png", get(logo_handler))
             .route("/status", get(move || async move {
                 status_handler(shield_status.clone()).await
             }))
@@ -210,6 +214,19 @@ async fn proxy_handler(
             (StatusCode::BAD_REQUEST, "Invalid upstream URI").into_response()
         }
     }
+}
+
+async fn dashboard_handler() -> Html<&'static str> {
+    Html(include_str!("../../widget/index.html"))
+}
+
+async fn logo_handler() -> impl IntoResponse {
+    let bytes: &'static [u8] = include_bytes!("../../assets/NexusShield_logo.png");
+    (
+        StatusCode::OK,
+        [("content-type", "image/png"), ("cache-control", "public, max-age=86400")],
+        bytes,
+    )
 }
 
 async fn status_handler(shield: Arc<Shield>) -> impl IntoResponse {

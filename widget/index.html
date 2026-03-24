@@ -1,0 +1,686 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NexusShield Dashboard</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --teal: #14b8a6;
+    --teal-dark: #0d9488;
+    --teal-light: #99f6e4;
+    --teal-ultra-light: #f0fdfa;
+    --terracotta: #c4a484;
+    --terracotta-dark: #a08060;
+    --terracotta-light: #e8d4c4;
+    --orange: #f97316;
+    --orange-light: #fed7aa;
+    --indigo: #4f46e5;
+    --indigo-light: #c7d2fe;
+    --background: #faf9f6;
+    --card-bg: #ffffff;
+    --cream: #f5ebe0;
+    --cream-light: #faf7f2;
+    --text-primary: #111827;
+    --text-secondary: #6b7280;
+    --text-muted: #9ca3af;
+    --border: #e5e7eb;
+    --border-cream: #f5ebe0;
+    --success: #10b981;
+    --success-bg: #f0fdf4;
+    --warning: #f59e0b;
+    --warning-bg: #fffbeb;
+    --error: #ef4444;
+    --error-bg: #fef2f2;
+    --info: #3b82f6;
+    --info-bg: #eff6ff;
+    --shadow-sm: 0 1px 2px rgba(0,0,0,0.05);
+    --shadow-md: 0 4px 6px -1px rgba(0,0,0,0.1);
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    width: 100%;
+    min-height: 100vh;
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: var(--background);
+    color: var(--text-primary);
+  }
+
+  .widget {
+    width: 100%;
+    min-height: 100vh;
+    display: grid;
+    grid-template-rows: 60px 1fr;
+    background: var(--background);
+  }
+
+  /* ── Header ── */
+  .header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 24px;
+    background: #ffffff;
+    border-bottom: 2px solid var(--teal);
+    box-shadow: var(--shadow-sm);
+  }
+
+  .header-left {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+
+  .logo-img {
+    height: 38px;
+    width: auto;
+    border-radius: 6px;
+  }
+
+  .header h1 {
+    font-size: 20px;
+    font-weight: 700;
+    color: var(--text-primary);
+    letter-spacing: -0.3px;
+  }
+
+  .header h1 span { color: var(--teal-dark); }
+
+  .header-right {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+  }
+
+  .version-tag {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    font-weight: 500;
+    color: var(--teal-dark);
+    background: var(--teal-ultra-light);
+    border: 1px solid var(--teal-light);
+    padding: 3px 10px;
+    border-radius: 12px;
+  }
+
+  .status-badge {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    background: var(--success-bg);
+    border: 1px solid #bbf7d0;
+    padding: 4px 14px;
+    border-radius: 16px;
+    font-size: 12px;
+    font-weight: 600;
+    color: #065f46;
+  }
+
+  .status-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--success);
+    box-shadow: 0 0 6px rgba(16,185,129,0.5);
+    animation: pulse 2s ease-in-out infinite;
+  }
+
+  .status-dot.offline {
+    background: var(--error);
+    box-shadow: 0 0 6px rgba(239,68,68,0.5);
+    animation: none;
+  }
+
+  .status-badge.offline-badge {
+    background: var(--error-bg);
+    border-color: #fecaca;
+    color: #991b1b;
+  }
+
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+  }
+
+  /* ── Main Grid ── */
+  .main {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    grid-template-rows: auto auto 1fr auto;
+    gap: 14px;
+    padding: 16px 20px 14px;
+    overflow-y: auto;
+  }
+
+  @media (max-width: 640px) {
+    .main { grid-template-columns: 1fr; }
+    .stat-row { grid-template-columns: 1fr 1fr; }
+    .audit-card { grid-column: 1; }
+    .footer { grid-column: 1; }
+  }
+
+  /* ── Cards ── */
+  .card {
+    background: var(--card-bg);
+    border-radius: 12px;
+    padding: 16px 18px;
+    border: 1px solid var(--border);
+    box-shadow: var(--shadow-sm);
+  }
+
+  .card-title {
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: var(--text-secondary);
+    margin-bottom: 12px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .card-title::before {
+    content: '';
+    width: 3px;
+    height: 14px;
+    border-radius: 2px;
+    background: var(--teal);
+  }
+
+  /* ── Stat Tiles ── */
+  .stat-row {
+    grid-column: 1 / -1;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 12px;
+  }
+
+  .stat-tile {
+    background: var(--card-bg);
+    border-radius: 12px;
+    padding: 14px 16px;
+    border: 1px solid var(--border);
+    box-shadow: var(--shadow-sm);
+    text-align: center;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .stat-tile::after {
+    content: '';
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    height: 3px;
+  }
+
+  .stat-tile:nth-child(1)::after { background: var(--teal); }
+  .stat-tile:nth-child(2)::after { background: var(--success); }
+  .stat-tile:nth-child(3)::after { background: var(--warning); }
+  .stat-tile:nth-child(4)::after { background: var(--error); }
+
+  .stat-value {
+    font-size: 30px;
+    font-weight: 800;
+    font-family: 'JetBrains Mono', monospace;
+    line-height: 1;
+    margin: 4px 0;
+  }
+
+  .stat-tile:nth-child(1) .stat-value { color: var(--teal-dark); }
+  .stat-tile:nth-child(2) .stat-value { color: var(--success); }
+  .stat-tile:nth-child(3) .stat-value { color: var(--warning); }
+  .stat-tile:nth-child(4) .stat-value { color: var(--error); }
+
+  .stat-label {
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+    color: var(--text-secondary);
+  }
+
+  .stat-sub {
+    font-size: 10px;
+    color: var(--text-muted);
+    margin-top: 3px;
+  }
+
+  /* ── Module Grid ── */
+  .module-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 6px;
+  }
+
+  .module-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 7px 10px;
+    border-radius: 8px;
+    background: var(--teal-ultra-light);
+    border: 1px solid #ccfbf1;
+    font-size: 11.5px;
+    font-weight: 500;
+    color: var(--text-primary);
+  }
+
+  .module-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--teal);
+    flex-shrink: 0;
+  }
+
+  /* ── Config ── */
+  .config-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+  }
+
+  .config-item {
+    padding: 10px 12px;
+    border-radius: 8px;
+    background: var(--cream-light);
+    border: 1px solid var(--border-cream);
+  }
+
+  .config-label {
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.6px;
+    color: var(--text-secondary);
+  }
+
+  .config-value {
+    font-size: 18px;
+    font-weight: 700;
+    font-family: 'JetBrains Mono', monospace;
+    color: var(--teal-dark);
+    margin-top: 2px;
+  }
+
+  /* ── Threat Bars ── */
+  .threat-bars {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .threat-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .threat-label {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-secondary);
+    width: 80px;
+    flex-shrink: 0;
+  }
+
+  .bar-track {
+    flex: 1;
+    height: 20px;
+    background: #f3f4f6;
+    border-radius: 10px;
+    overflow: hidden;
+  }
+
+  .bar-fill {
+    height: 100%;
+    border-radius: 10px;
+    transition: width 0.6s ease;
+    min-width: 0;
+  }
+
+  .bar-fill.teal { background: linear-gradient(90deg, var(--teal-light), var(--teal)); }
+  .bar-fill.warn { background: linear-gradient(90deg, var(--orange-light), var(--orange)); }
+  .bar-fill.danger { background: linear-gradient(90deg, #fecaca, var(--error)); }
+  .bar-fill.info { background: linear-gradient(90deg, var(--indigo-light), var(--indigo)); }
+
+  .bar-count {
+    font-size: 12px;
+    font-weight: 700;
+    font-family: 'JetBrains Mono', monospace;
+    color: var(--text-primary);
+    width: 36px;
+    text-align: right;
+    flex-shrink: 0;
+  }
+
+  /* ── Audit Log ── */
+  .audit-card { grid-column: 1 / -1; }
+
+  .audit-list {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    max-height: 40vh;
+    overflow-y: auto;
+  }
+
+  .audit-list::-webkit-scrollbar { width: 4px; }
+  .audit-list::-webkit-scrollbar-track { background: transparent; }
+  .audit-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+  .audit-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 7px 12px;
+    border-radius: 8px;
+    background: #f9fafb;
+    border: 1px solid var(--border);
+    font-size: 12px;
+  }
+
+  .audit-type {
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+    flex-shrink: 0;
+  }
+
+  .audit-type.block { background: var(--error-bg); color: var(--error); }
+  .audit-type.warn { background: var(--warning-bg); color: #92400e; }
+  .audit-type.rate { background: #fff7ed; color: var(--orange); }
+  .audit-type.info { background: var(--info-bg); color: var(--info); }
+  .audit-type.sql { background: #faf5ff; color: #7c3aed; }
+  .audit-type.ssrf { background: #fdf2f8; color: #db2777; }
+
+  .audit-msg {
+    flex: 1;
+    color: var(--text-primary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    font-size: 11.5px;
+  }
+
+  .audit-time {
+    font-size: 10px;
+    font-family: 'JetBrains Mono', monospace;
+    color: var(--text-muted);
+    flex-shrink: 0;
+  }
+
+  .empty-state {
+    text-align: center;
+    padding: 20px;
+    color: var(--text-muted);
+    font-size: 12px;
+    font-style: italic;
+  }
+
+  /* ── Footer ── */
+  .footer {
+    grid-column: 1 / -1;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 10px;
+    color: var(--text-muted);
+    padding-top: 2px;
+  }
+
+  .footer a { color: var(--teal-dark); text-decoration: none; }
+
+  .refresh-indicator {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+  }
+
+  .spin { animation: spin 1s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+<div class="widget">
+  <!-- Header -->
+  <div class="header">
+    <div class="header-left">
+      <img class="logo-img" src="/logo.png" alt="NexusShield">
+      <h1>Nexus<span>Shield</span></h1>
+    </div>
+    <div class="header-right">
+      <div class="version-tag" id="versionTag">v0.1.0</div>
+      <div class="status-badge" id="statusBadge">
+        <div class="status-dot" id="statusDot"></div>
+        <span id="statusText">Connecting...</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Main -->
+  <div class="main">
+    <!-- Stat Tiles -->
+    <div class="stat-row">
+      <div class="stat-tile">
+        <div class="stat-label">Total Events</div>
+        <div class="stat-value" id="totalEvents">--</div>
+        <div class="stat-sub">audit chain</div>
+      </div>
+      <div class="stat-tile">
+        <div class="stat-label">Allowed</div>
+        <div class="stat-value" id="allowedCount">--</div>
+        <div class="stat-sub">last hour</div>
+      </div>
+      <div class="stat-tile">
+        <div class="stat-label">Rate Limited</div>
+        <div class="stat-value" id="rateLimited">--</div>
+        <div class="stat-sub">last hour</div>
+      </div>
+      <div class="stat-tile">
+        <div class="stat-label">Blocked</div>
+        <div class="stat-value" id="blocked">--</div>
+        <div class="stat-sub">last hour</div>
+      </div>
+    </div>
+
+    <!-- Modules -->
+    <div class="card">
+      <div class="card-title">Active Modules</div>
+      <div class="module-grid" id="moduleGrid"></div>
+    </div>
+
+    <!-- Config -->
+    <div class="card">
+      <div class="card-title">Configuration</div>
+      <div class="config-grid" id="configGrid"></div>
+    </div>
+
+    <!-- Threat Breakdown 5min -->
+    <div class="card">
+      <div class="card-title">Threats (5 min)</div>
+      <div class="threat-bars" id="threatBars"></div>
+    </div>
+
+    <!-- Threat Breakdown Hour -->
+    <div class="card">
+      <div class="card-title">Threats (1 hour)</div>
+      <div class="threat-bars" id="threatBarsHour"></div>
+    </div>
+
+    <!-- Audit Log -->
+    <div class="card audit-card">
+      <div class="card-title">Recent Audit Events</div>
+      <div class="audit-list" id="auditList">
+        <div class="empty-state">No events recorded yet -- shield is watching</div>
+      </div>
+    </div>
+
+    <!-- Footer -->
+    <div class="footer">
+      <span>NexusShield <span id="version">v0.1.0</span> -- Adaptive Zero-Trust Gateway -- <a>AutomataNexus</a></span>
+      <div class="refresh-indicator">
+        <svg id="refreshIcon" width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M1 8a7 7 0 0113.4-2.8M15 8A7 7 0 011.6 10.8"/>
+          <path d="M14.4 1v4.2h-4.2M1.6 15v-4.2h4.2"/>
+        </svg>
+        <span id="lastUpdate">--</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+const BASE = '';
+const POLL_MS = 3000;
+
+const moduleNames = {
+  sql_firewall: 'SQL Firewall',
+  ssrf_guard: 'SSRF Guard',
+  rate_governor: 'Rate Governor',
+  fingerprint: 'Fingerprint',
+  quarantine: 'Quarantine',
+  email_guard: 'Email Guard',
+  credential_vault: 'Credential Vault',
+  audit_chain: 'Audit Chain',
+  sanitizer: 'Sanitizer',
+  threat_score: 'Threat Score'
+};
+
+const configLabels = {
+  block_threshold: 'Block',
+  warn_threshold: 'Warn',
+  rate_rps: 'RPS',
+  rate_burst: 'Burst'
+};
+
+function setOnline(ok) {
+  const dot = document.getElementById('statusDot');
+  const txt = document.getElementById('statusText');
+  const badge = document.getElementById('statusBadge');
+  if (ok) {
+    dot.classList.remove('offline');
+    badge.classList.remove('offline-badge');
+    txt.textContent = 'Active';
+  } else {
+    dot.classList.add('offline');
+    badge.classList.add('offline-badge');
+    txt.textContent = 'Offline';
+  }
+}
+
+function renderModules(modules) {
+  const el = document.getElementById('moduleGrid');
+  el.innerHTML = modules.map(m =>
+    `<div class="module-item"><div class="module-dot"></div>${moduleNames[m] || m}</div>`
+  ).join('');
+}
+
+function renderConfig(cfg) {
+  const el = document.getElementById('configGrid');
+  el.innerHTML = Object.entries(configLabels).map(([k, label]) =>
+    `<div class="config-item">
+      <div class="config-label">${label}</div>
+      <div class="config-value">${cfg[k] != null ? cfg[k] : '--'}</div>
+    </div>`
+  ).join('');
+}
+
+function renderBars(containerId, data) {
+  const el = document.getElementById(containerId);
+  const items = [
+    { key: 'sql_injection', label: 'SQL Inject', cls: 'danger' },
+    { key: 'ssrf',          label: 'SSRF',       cls: 'warn' },
+    { key: 'blocked',       label: 'Blocked',    cls: 'teal' },
+    { key: 'rate_limited',  label: 'Rate Limit', cls: 'info' }
+  ];
+  const max = Math.max(1, ...items.map(i => data[i.key] || 0));
+  el.innerHTML = items.map(i => {
+    const v = data[i.key] || 0;
+    const pct = (v / max) * 100;
+    return `<div class="threat-row">
+      <div class="threat-label">${i.label}</div>
+      <div class="bar-track"><div class="bar-fill ${i.cls}" style="width:${pct}%"></div></div>
+      <div class="bar-count">${v}</div>
+    </div>`;
+  }).join('');
+}
+
+function renderAudit(events) {
+  const el = document.getElementById('auditList');
+  if (!events || events.length === 0) {
+    el.innerHTML = '<div class="empty-state">No events recorded yet -- shield is watching</div>';
+    return;
+  }
+  el.innerHTML = events.slice(-20).reverse().map(ev => {
+    const t = ev.event_type || '';
+    let cls = 'info';
+    if (/block/i.test(t)) cls = 'block';
+    else if (/rate/i.test(t)) cls = 'rate';
+    else if (/sql/i.test(t)) cls = 'sql';
+    else if (/ssrf/i.test(t)) cls = 'ssrf';
+    else if (/warn|suspicious/i.test(t)) cls = 'warn';
+    const time = ev.timestamp ? new Date(ev.timestamp).toLocaleTimeString() : '';
+    const msg = ev.description || ev.details || t;
+    return `<div class="audit-item">
+      <span class="audit-type ${cls}">${t.replace(/_/g,' ')}</span>
+      <span class="audit-msg" title="${msg}">${msg}</span>
+      <span class="audit-time">${time}</span>
+    </div>`;
+  }).join('');
+}
+
+async function fetchJSON(path) {
+  const r = await fetch(BASE + path);
+  if (!r.ok) throw new Error(r.status);
+  return r.json();
+}
+
+async function refresh() {
+  const icon = document.getElementById('refreshIcon');
+  icon.classList.add('spin');
+  try {
+    const [status, stats, audit] = await Promise.all([
+      fetchJSON('/status'),
+      fetchJSON('/stats'),
+      fetchJSON('/audit')
+    ]);
+
+    setOnline(true);
+    const ver = 'v' + (status.version || '0.1.0');
+    document.getElementById('versionTag').textContent = ver;
+    document.getElementById('version').textContent = ver;
+    document.getElementById('totalEvents').textContent = status.audit_chain?.total_events ?? 0;
+
+    const hour = stats.last_hour || {};
+    const allowed = (status.audit_chain?.total_events ?? 0) - (hour.blocked || 0) - (hour.rate_limited || 0);
+    document.getElementById('allowedCount').textContent = Math.max(0, allowed);
+    document.getElementById('rateLimited').textContent = hour.rate_limited || 0;
+    document.getElementById('blocked').textContent = hour.blocked || 0;
+
+    renderModules(status.modules || []);
+    renderConfig(status.config || {});
+    renderBars('threatBars', stats.last_5min || {});
+    renderBars('threatBarsHour', stats.last_hour || {});
+    renderAudit(audit.recent_events || []);
+
+    document.getElementById('lastUpdate').textContent = new Date().toLocaleTimeString();
+  } catch (e) {
+    setOnline(false);
+  }
+  icon.classList.remove('spin');
+}
+
+refresh();
+setInterval(refresh, POLL_MS);
+</script>
+</body>
+</html>

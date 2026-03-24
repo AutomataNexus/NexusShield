@@ -1,729 +1,437 @@
-# NexusShield REST API Reference
+# NexusShield API Reference
 
-Complete reference for all 13 REST API endpoints exposed by NexusShield when integrated with the Aegis-DB server. All endpoints are prefixed with `/api/v1/shield/`.
+Complete reference for the 4 HTTP endpoints exposed by the NexusShield security gateway. These endpoints are available in both reverse proxy mode and standalone mode.
 
-Base URL: `http://localhost:9090`
-
----
-
-## Table of Contents
-
-| # | Method | Endpoint | Description |
-|---|--------|----------|-------------|
-| 1 | `GET` | `/api/v1/shield/status` | Get shield engine status |
-| 2 | `GET` | `/api/v1/shield/stats` | Get aggregated threat statistics |
-| 3 | `GET` | `/api/v1/shield/events` | Get recent threat events |
-| 4 | `GET` | `/api/v1/shield/events/:id` | Get a specific threat event by ID |
-| 5 | `GET` | `/api/v1/shield/blocked` | List all blocked IPs |
-| 6 | `POST` | `/api/v1/shield/block` | Manually block an IP |
-| 7 | `DELETE` | `/api/v1/shield/block/:ip` | Unblock an IP |
-| 8 | `GET` | `/api/v1/shield/allowlist` | List allowlisted IPs |
-| 9 | `POST` | `/api/v1/shield/allowlist` | Add IP to allowlist |
-| 10 | `DELETE` | `/api/v1/shield/allowlist/:ip` | Remove IP from allowlist |
-| 11 | `GET` | `/api/v1/shield/reputation/:ip` | Get IP reputation details |
-| 12 | `GET` | `/api/v1/shield/policy` | Get current security policy |
-| 13 | `PUT` | `/api/v1/shield/policy` | Update security policy |
+Base URL: `http://localhost:8080` (default port)
 
 ---
 
-## 1. Get Shield Status
+## Endpoint Summary
 
-Returns a summary of the shield engine's current operational state.
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/health` | Health check |
+| `GET` | `/status` | Gateway configuration, modules, audit chain integrity |
+| `GET` | `/audit` | Recent security events with chain verification |
+| `GET` | `/stats` | Threat statistics for last 5 minutes and last hour |
 
-**Endpoint:** `GET /api/v1/shield/status`
+All other paths are either proxied to the upstream (in proxy mode) or return "NexusShield: request inspected and allowed" (in standalone mode). All paths pass through the full security middleware pipeline before being handled.
 
-**Authentication:** Required (admin)
+---
 
-**Parameters:** None
+## 1. Health Check
 
-**curl Example:**
+Returns a plain-text health status. Use this for load balancer health probes and uptime monitoring.
+
+**Endpoint:** `GET /health`
+
+**Authentication:** None required
+
+### Request
 
 ```bash
-curl -s http://localhost:9090/api/v1/shield/status \
-  -H "Authorization: Bearer <token>"
+curl http://localhost:8080/health
 ```
 
-**Response (200 OK):**
+### Response
+
+**Status:** `200 OK`
+**Content-Type:** `text/plain`
+
+```
+NexusShield OK
+```
+
+### Notes
+
+- This endpoint always returns `200 OK` as long as the NexusShield process is running.
+- The response is a fixed string; no JSON parsing is needed.
+- This endpoint passes through the security middleware, so requests from banned IPs will receive `429 Too Many Requests` instead.
+
+---
+
+## 2. Gateway Status
+
+Returns the full gateway configuration, list of active security modules, and audit chain integrity status.
+
+**Endpoint:** `GET /status`
+
+**Authentication:** None required (status is not sensitive)
+
+### Request
+
+```bash
+curl -s http://localhost:8080/status | jq .
+```
+
+### Response
+
+**Status:** `200 OK`
+**Content-Type:** `application/json`
 
 ```json
 {
-  "enabled": true,
-  "preset": "Moderate",
-  "uptime_secs": 86400,
-  "total_requests_analyzed": 152847,
-  "total_threats_detected": 23,
-  "active_bans": 2,
-  "blocked_ips": 3
+  "service": "NexusShield",
+  "version": "0.1.0",
+  "status": "active",
+  "config": {
+    "block_threshold": 0.7,
+    "warn_threshold": 0.4,
+    "rate_rps": 50.0,
+    "rate_burst": 100.0
+  },
+  "audit_chain": {
+    "total_events": 1247,
+    "chain_valid": true
+  },
+  "modules": [
+    "sql_firewall",
+    "ssrf_guard",
+    "rate_governor",
+    "fingerprint",
+    "quarantine",
+    "email_guard",
+    "credential_vault",
+    "audit_chain",
+    "sanitizer",
+    "threat_score"
+  ]
 }
 ```
 
-**Response Fields:**
+### Response Schema
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `enabled` | `bool` | Whether the shield is actively processing requests |
-| `preset` | `string` | Active security preset: `"Strict"`, `"Moderate"`, or `"Permissive"` |
-| `uptime_secs` | `u64` | Seconds since the shield engine was initialized |
-| `total_requests_analyzed` | `u64` | Total number of requests processed by `analyze_request()` |
-| `total_threats_detected` | `u64` | Total number of threats that resulted in Block or RateLimit |
-| `active_bans` | `usize` | Number of IPs currently banned in the reputation tracker |
-| `blocked_ips` | `usize` | Number of IPs currently in the auto-blocker's block list |
+| `service` | `string` | Always `"NexusShield"` |
+| `version` | `string` | NexusShield version |
+| `status` | `string` | Always `"active"` when the gateway is running |
+| `config` | `object` | Active configuration parameters (see below) |
+| `audit_chain` | `object` | Audit chain status (see below) |
+| `modules` | `array<string>` | List of active security modules |
+
+**`config` fields:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `block_threshold` | `f64` | Threat score at which requests are blocked (0.0-1.0) |
+| `warn_threshold` | `f64` | Threat score at which warnings are logged (0.0-1.0) |
+| `rate_rps` | `f64` | Configured requests per second per IP |
+| `rate_burst` | `f64` | Token bucket burst capacity |
+
+**`audit_chain` fields:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `total_events` | `usize` | Total events currently stored in the chain |
+| `chain_valid` | `bool` | Whether the full SHA-256 hash chain verifies without tampering |
+
+### Examples
+
+**Check if chain integrity is intact:**
+
+```bash
+curl -s http://localhost:8080/status | jq '.audit_chain.chain_valid'
+# true
+```
+
+**Get current thresholds:**
+
+```bash
+curl -s http://localhost:8080/status | jq '.config'
+# {
+#   "block_threshold": 0.7,
+#   "warn_threshold": 0.4,
+#   "rate_rps": 50.0,
+#   "rate_burst": 100.0
+# }
+```
+
+**List active modules:**
+
+```bash
+curl -s http://localhost:8080/status | jq '.modules[]'
+# "sql_firewall"
+# "ssrf_guard"
+# "rate_governor"
+# ...
+```
 
 ---
 
-## 2. Get Threat Statistics
+## 3. Audit Events
 
-Returns aggregated threat statistics including event breakdowns by level and type, top offending IPs, and current block/ban counts.
+Returns the 50 most recent security events from the hash-chained audit log (newest first), along with the total event count and chain integrity status.
 
-**Endpoint:** `GET /api/v1/shield/stats`
+**Endpoint:** `GET /audit`
 
-**Authentication:** Required (admin)
+**Authentication:** None required
 
-**Parameters:** None
-
-**curl Example:**
+### Request
 
 ```bash
-curl -s http://localhost:9090/api/v1/shield/stats \
-  -H "Authorization: Bearer <token>"
+curl -s http://localhost:8080/audit | jq .
 ```
 
-**Response (200 OK):**
+### Response
+
+**Status:** `200 OK`
+**Content-Type:** `application/json`
 
 ```json
 {
-  "total_events": 47,
-  "events_by_level": {
-    "critical": 2,
-    "high": 8,
-    "medium": 15,
-    "low": 12,
-    "info": 10
-  },
-  "events_by_type": {
-    "SqlInjection": 18,
-    "BruteForce": 12,
-    "SuspiciousFingerprint": 9,
-    "QueryAnomaly": 8
-  },
-  "blocked_ips_count": 3,
-  "active_bans": 2,
-  "top_offending_ips": [
-    ["203.0.113.42", 12],
-    ["198.51.100.7", 8],
-    ["192.0.2.15", 5]
+  "recent_events": [
+    {
+      "id": "550e8400-e29b-41d4-a716-446655440000",
+      "timestamp": "2026-03-24T10:30:00.123456Z",
+      "event_type": "RequestBlocked",
+      "source_ip": "203.0.113.42",
+      "details": "score=0.823, fingerprint=0.700, rate=0.900, behavioral=0.600",
+      "threat_score": 0.823
+    },
+    {
+      "id": "6ba7b810-9dad-11d1-80b4-00c04fd430c8",
+      "timestamp": "2026-03-24T10:29:55.456789Z",
+      "event_type": "RateLimitHit",
+      "source_ip": "198.51.100.7",
+      "details": "escalation=Block, violations=16",
+      "threat_score": 0.8
+    },
+    {
+      "id": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+      "timestamp": "2026-03-24T10:29:50.789012Z",
+      "event_type": "SqlInjectionAttempt",
+      "source_ip": "192.0.2.15",
+      "details": "UnionInjection, DangerousFunction(\"sleep\")",
+      "threat_score": 0.95
+    },
+    {
+      "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+      "timestamp": "2026-03-24T10:28:00.000000Z",
+      "event_type": "RequestAllowed",
+      "source_ip": "203.0.113.10",
+      "details": "WARN: score=0.450",
+      "threat_score": 0.45
+    }
   ],
-  "last_critical_event": 1711324800
+  "total": 1247,
+  "chain_valid": true
 }
 ```
 
-**Response Fields:**
+### Response Schema
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `total_events` | `u64` | Total threat events ever recorded |
-| `events_by_level` | `map<string, u64>` | Event count grouped by threat level |
-| `events_by_type` | `map<string, u64>` | Event count grouped by threat type |
-| `blocked_ips_count` | `u64` | IPs currently in auto-blocker |
-| `active_bans` | `u64` | IPs currently banned in reputation tracker |
-| `top_offending_ips` | `array<[string, u32]>` | Top 10 IPs by event count |
-| `last_critical_event` | `i64 | null` | Unix timestamp of last critical event, or null |
+| `recent_events` | `array<object>` | Up to 50 most recent events, newest first |
+| `total` | `usize` | Total events in the audit chain |
+| `chain_valid` | `bool` | Whether the full hash chain verifies |
+
+**Event object fields:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `id` | `string` | UUID v4 unique identifier |
+| `timestamp` | `string` | RFC 3339 timestamp (e.g., `"2026-03-24T10:30:00.123456Z"`) |
+| `event_type` | `string` | Security event type (see below) |
+| `source_ip` | `string` | Client IP address that triggered the event |
+| `details` | `string` | Human-readable description (internal diagnostic info) |
+| `threat_score` | `f64` | Threat score at the time of the event (0.0-1.0) |
+
+**Possible `event_type` values:**
+
+| Event Type | Description |
+|------------|-------------|
+| `RequestAllowed` | Request passed all checks (logged when threat score triggers a warning) |
+| `RequestBlocked` | Request blocked due to high threat score |
+| `RateLimitHit` | Request denied by the rate governor |
+| `SqlInjectionAttempt` | SQL firewall detected an injection attempt |
+| `SsrfAttempt` | SSRF guard blocked a URL or IP |
+| `PathTraversalAttempt` | Path traversal detected in file path validation |
+| `MaliciousPayload` | Malicious content detected (email injection, etc.) |
+| `DataQuarantined` | Imported data failed quarantine validation |
+| `AuthFailure` | Authentication failure recorded |
+| `BanIssued` | IP ban applied |
+| `BanLifted` | IP ban removed |
+| `ChainVerified` | Chain integrity verification was performed |
+
+### Examples
+
+**Get the 5 most recent blocked requests:**
+
+```bash
+curl -s http://localhost:8080/audit | \
+  jq '[.recent_events[] | select(.event_type == "RequestBlocked")] | .[0:5]'
+```
+
+**Check if the audit chain has been tampered with:**
+
+```bash
+curl -s http://localhost:8080/audit | jq '.chain_valid'
+# true
+```
+
+**Get all SQL injection attempts:**
+
+```bash
+curl -s http://localhost:8080/audit | \
+  jq '[.recent_events[] | select(.event_type == "SqlInjectionAttempt")]'
+```
+
+**Get events from a specific IP:**
+
+```bash
+curl -s http://localhost:8080/audit | \
+  jq '[.recent_events[] | select(.source_ip == "203.0.113.42")]'
+```
 
 ---
 
-## 3. Get Recent Threat Events
+## 4. Threat Statistics
 
-Returns the most recent threat events from the rolling in-memory buffer, newest first.
+Returns aggregated threat counts for two time windows: the last 5 minutes and the last hour. Useful for dashboards and alerting.
 
-**Endpoint:** `GET /api/v1/shield/events`
+**Endpoint:** `GET /stats`
 
-**Authentication:** Required (admin)
+**Authentication:** None required
 
-**Query Parameters:**
-
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `limit` | `usize` | `50` | Maximum number of events to return |
-
-**curl Example:**
+### Request
 
 ```bash
-curl -s "http://localhost:9090/api/v1/shield/events?limit=10" \
-  -H "Authorization: Bearer <token>"
+curl -s http://localhost:8080/stats | jq .
 ```
 
-**Response (200 OK):**
+### Response
+
+**Status:** `200 OK`
+**Content-Type:** `application/json`
 
 ```json
-[
-  {
-    "id": "550e8400-e29b-41d4-a716-446655440000",
-    "timestamp": 1711324800,
-    "threat_type": "SqlInjection",
-    "level": "High",
-    "score": 85,
-    "source_ip": "203.0.113.42",
-    "description": "SQL injection patterns: union_select, or_always_true",
-    "request_path": "/api/v1/query",
-    "user_agent": "curl/7.81.0",
-    "details": {},
-    "action_taken": "Blocked"
+{
+  "last_5min": {
+    "blocked": 3,
+    "rate_limited": 12,
+    "sql_injection": 1,
+    "ssrf": 0
   },
-  {
-    "id": "6ba7b810-9dad-11d1-80b4-00c04fd430c8",
-    "timestamp": 1711324700,
-    "threat_type": "BruteForce",
-    "level": "Medium",
-    "score": 50,
-    "source_ip": "198.51.100.7",
-    "description": "failed auth for user 'admin'",
-    "request_path": "/api/v1/auth/login",
-    "user_agent": "python-requests/2.31.0",
-    "details": { "username": "admin" },
-    "action_taken": "Allowed"
-  }
-]
-```
-
-**Event Fields:**
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `id` | `string` | UUID v4 identifier |
-| `timestamp` | `i64` | Unix epoch timestamp |
-| `threat_type` | `string` | One of: `SqlInjection`, `QueryAnomaly`, `BruteForce`, `RateLimitAbuse`, `SuspiciousFingerprint`, `ReputationBlock`, `UnauthorizedAccess`, `PortScan` |
-| `level` | `string` | One of: `Critical`, `High`, `Medium`, `Low`, `Info` |
-| `score` | `u32` | Threat score (0-100) |
-| `source_ip` | `string` | Source IP address |
-| `description` | `string` | Human-readable description |
-| `request_path` | `string` | HTTP path that triggered the event |
-| `user_agent` | `string | null` | User-Agent header, if present |
-| `details` | `object` | Additional JSON details (varies by threat type) |
-| `action_taken` | `string` | One of: `Allowed`, `RateLimited`, `Blocked`, `Banned` |
-
----
-
-## 4. Get Threat Event by ID
-
-Retrieves a single threat event by its UUID.
-
-**Endpoint:** `GET /api/v1/shield/events/:id`
-
-**Authentication:** Required (admin)
-
-**Path Parameters:**
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `id` | `string` | UUID of the threat event |
-
-**curl Example:**
-
-```bash
-curl -s http://localhost:9090/api/v1/shield/events/550e8400-e29b-41d4-a716-446655440000 \
-  -H "Authorization: Bearer <token>"
-```
-
-**Response (200 OK):**
-
-```json
-{
-  "id": "550e8400-e29b-41d4-a716-446655440000",
-  "timestamp": 1711324800,
-  "threat_type": "SqlInjection",
-  "level": "High",
-  "score": 85,
-  "source_ip": "203.0.113.42",
-  "description": "SQL injection patterns: union_select, or_always_true",
-  "request_path": "/api/v1/query",
-  "user_agent": "curl/7.81.0",
-  "details": {},
-  "action_taken": "Blocked"
-}
-```
-
-**Response (404 Not Found):**
-
-```json
-{
-  "error": "Event not found"
-}
-```
-
----
-
-## 5. List Blocked IPs
-
-Returns all currently active (non-expired) IP blocks from the auto-blocker.
-
-**Endpoint:** `GET /api/v1/shield/blocked`
-
-**Authentication:** Required (admin)
-
-**Parameters:** None
-
-**curl Example:**
-
-```bash
-curl -s http://localhost:9090/api/v1/shield/blocked \
-  -H "Authorization: Bearer <token>"
-```
-
-**Response (200 OK):**
-
-```json
-[
-  {
-    "ip": "203.0.113.42",
-    "reason": "SQL injection score 95",
-    "blocked_at": 1711324800,
-    "expires_at": 1711328400,
-    "threat_level": "Critical"
+  "last_hour": {
+    "blocked": 18,
+    "rate_limited": 47,
+    "sql_injection": 5,
+    "ssrf": 2
   },
-  {
-    "ip": "198.51.100.7",
-    "reason": "brute force detected",
-    "blocked_at": 1711320000,
-    "expires_at": 1711327200,
-    "threat_level": "High"
-  }
-]
+  "total_audit_events": 1247
+}
 ```
 
-**Block Entry Fields:**
+### Response Schema
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `ip` | `string` | Blocked IP address |
-| `reason` | `string` | Human-readable reason for the block |
-| `blocked_at` | `u64` | Unix epoch when the block was created |
-| `expires_at` | `u64 | null` | Unix epoch when the block expires, or null for permanent |
-| `threat_level` | `string` | One of: `Critical`, `High`, `Medium`, `Low`, `Info` |
-
----
-
-## 6. Manually Block an IP
-
-Adds a manual IP block with a custom reason and duration.
-
-**Endpoint:** `POST /api/v1/shield/block`
-
-**Authentication:** Required (admin)
-
-**Request Body:**
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `ip` | `string` | Yes | IP address to block |
-| `reason` | `string` | Yes | Reason for the block |
-| `duration_secs` | `u64` | Yes | Block duration in seconds |
-
-**curl Example:**
-
-```bash
-curl -s -X POST http://localhost:9090/api/v1/shield/block \
-  -H "Authorization: Bearer <token>" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "ip": "203.0.113.42",
-    "reason": "suspicious activity reported by SOC",
-    "duration_secs": 86400
-  }'
-```
-
-**Response (200 OK):**
-
-```json
-{
-  "status": "blocked",
-  "ip": "203.0.113.42",
-  "expires_at": 1711411200
-}
-```
-
----
-
-## 7. Unblock an IP
-
-Removes an IP from both the auto-blocker block list and the reputation ban list.
-
-**Endpoint:** `DELETE /api/v1/shield/block/:ip`
-
-**Authentication:** Required (admin)
-
-**Path Parameters:**
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `ip` | `string` | IP address to unblock |
-
-**curl Example:**
-
-```bash
-curl -s -X DELETE http://localhost:9090/api/v1/shield/block/203.0.113.42 \
-  -H "Authorization: Bearer <token>"
-```
-
-**Response (200 OK):**
-
-```json
-{
-  "status": "unblocked",
-  "ip": "203.0.113.42"
-}
-```
-
-**Response (404 Not Found):**
-
-```json
-{
-  "error": "IP not found in block list"
-}
-```
-
----
-
-## 8. List Allowlisted IPs
-
-Returns all IPs currently on the allowlist. Allowlisted IPs bypass all security checks.
-
-**Endpoint:** `GET /api/v1/shield/allowlist`
-
-**Authentication:** Required (admin)
-
-**Parameters:** None
-
-**curl Example:**
-
-```bash
-curl -s http://localhost:9090/api/v1/shield/allowlist \
-  -H "Authorization: Bearer <token>"
-```
-
-**Response (200 OK):**
-
-```json
-[
-  "10.0.0.1",
-  "10.0.0.2",
-  "127.0.0.1"
-]
-```
-
----
-
-## 9. Add IP to Allowlist
-
-Adds an IP address to the allowlist. Allowlisted IPs bypass all security checks, including IP bans and auto-blocking.
-
-**Endpoint:** `POST /api/v1/shield/allowlist`
-
-**Authentication:** Required (admin)
-
-**Request Body:**
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `ip` | `string` | Yes | IP address to allowlist |
-
-**curl Example:**
-
-```bash
-curl -s -X POST http://localhost:9090/api/v1/shield/allowlist \
-  -H "Authorization: Bearer <token>" \
-  -H "Content-Type: application/json" \
-  -d '{"ip": "10.0.0.5"}'
-```
-
-**Response (200 OK):**
-
-```json
-{
-  "status": "added",
-  "ip": "10.0.0.5"
-}
-```
-
----
-
-## 10. Remove IP from Allowlist
-
-Removes an IP from the allowlist. The IP will be subject to normal security checks on subsequent requests.
-
-**Endpoint:** `DELETE /api/v1/shield/allowlist/:ip`
-
-**Authentication:** Required (admin)
-
-**Path Parameters:**
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `ip` | `string` | IP address to remove |
-
-**curl Example:**
-
-```bash
-curl -s -X DELETE http://localhost:9090/api/v1/shield/allowlist/10.0.0.5 \
-  -H "Authorization: Bearer <token>"
-```
-
-**Response (200 OK):**
-
-```json
-{
-  "status": "removed",
-  "ip": "10.0.0.5"
-}
-```
-
----
-
-## 11. Get IP Reputation
-
-Returns the full reputation record for a specific IP address, including score, request counts, ban status, and timestamps.
-
-**Endpoint:** `GET /api/v1/shield/reputation/:ip`
-
-**Authentication:** Required (admin)
-
-**Path Parameters:**
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `ip` | `string` | IP address to look up |
-
-**curl Example:**
-
-```bash
-curl -s http://localhost:9090/api/v1/shield/reputation/203.0.113.42 \
-  -H "Authorization: Bearer <token>"
-```
-
-**Response (200 OK):**
-
-```json
-{
-  "ip": "203.0.113.42",
-  "score": -47,
-  "total_requests": 312,
-  "failed_auths": 8,
-  "blocked_requests": 5,
-  "threat_events": 12,
-  "first_seen": 1711238400,
-  "last_seen": 1711324800,
-  "banned_until": 1711332000,
-  "ban_reason": "brute force detected"
-}
-```
-
-**Response (404 Not Found):**
-
-```json
-{
-  "error": "IP not found"
-}
-```
-
-**Response Fields:**
+| `last_5min` | `object` | Event counts from the last 5 minutes |
+| `last_hour` | `object` | Event counts from the last hour |
+| `total_audit_events` | `usize` | Total events in the audit chain |
+
+**Time window fields (same for both `last_5min` and `last_hour`):**
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `ip` | `string` | The IP address |
-| `score` | `i32` | Reputation score from -100 (worst) to +100 (best) |
-| `total_requests` | `u64` | Total requests from this IP |
-| `failed_auths` | `u64` | Number of failed authentication attempts |
-| `blocked_requests` | `u64` | Number of requests blocked by shield |
-| `threat_events` | `u64` | Number of threat events generated |
-| `first_seen` | `i64` | Unix timestamp of first request |
-| `last_seen` | `i64` | Unix timestamp of most recent request |
-| `banned_until` | `u64 | null` | Unix timestamp when ban expires, or null if not banned |
-| `ban_reason` | `string | null` | Reason for current ban, or null |
+| `blocked` | `usize` | Requests blocked by threat score (`RequestBlocked` events) |
+| `rate_limited` | `usize` | Requests denied by rate governor (`RateLimitHit` events) |
+| `sql_injection` | `usize` | SQL injection attempts detected (`SqlInjectionAttempt` events) |
+| `ssrf` | `usize` | SSRF attempts blocked (`SsrfAttempt` events) |
 
----
+### Examples
 
-## 12. Get Security Policy
-
-Returns the currently active security policy, including preset, enabled modules, and custom rules.
-
-**Endpoint:** `GET /api/v1/shield/policy`
-
-**Authentication:** Required (admin)
-
-**Parameters:** None
-
-**curl Example:**
+**Check if there are active attacks (last 5 minutes):**
 
 ```bash
-curl -s http://localhost:9090/api/v1/shield/policy \
-  -H "Authorization: Bearer <token>"
+curl -s http://localhost:8080/stats | jq '.last_5min'
+# {
+#   "blocked": 3,
+#   "rate_limited": 12,
+#   "sql_injection": 1,
+#   "ssrf": 0
+# }
 ```
 
-**Response (200 OK):**
-
-```json
-{
-  "preset": "Moderate",
-  "sql_injection_enabled": true,
-  "anomaly_detection_enabled": true,
-  "ip_reputation_enabled": true,
-  "fingerprinting_enabled": true,
-  "auto_blocking_enabled": true,
-  "custom_rules": []
-}
-```
-
----
-
-## 13. Update Security Policy
-
-Replaces the active security policy. Takes effect immediately for all subsequent requests and queries.
-
-**Endpoint:** `PUT /api/v1/shield/policy`
-
-**Authentication:** Required (admin)
-
-**Request Body:**
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `preset` | `string` | Yes | `"Strict"`, `"Moderate"`, or `"Permissive"` |
-| `sql_injection_enabled` | `bool` | Yes | Enable SQL injection detection |
-| `anomaly_detection_enabled` | `bool` | Yes | Enable anomaly detection |
-| `ip_reputation_enabled` | `bool` | Yes | Enable IP reputation tracking |
-| `fingerprinting_enabled` | `bool` | Yes | Enable request fingerprinting |
-| `auto_blocking_enabled` | `bool` | Yes | Enable automatic IP blocking |
-| `custom_rules` | `array` | No | Array of custom rule objects |
-
-**Custom Rule Object:**
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `name` | `string` | Yes | Rule name for identification |
-| `path_pattern` | `string | null` | No | Path prefix to match (null = all paths) |
-| `max_score` | `u32` | Yes | Score threshold that triggers this rule |
-| `action` | `string` | Yes | `"Allowed"`, `"RateLimited"`, `"Blocked"`, or `"Banned"` |
-
-**curl Example (switch to Strict with custom rule):**
+**Get total blocked in the last hour:**
 
 ```bash
-curl -s -X PUT http://localhost:9090/api/v1/shield/policy \
-  -H "Authorization: Bearer <token>" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "preset": "Strict",
-    "sql_injection_enabled": true,
-    "anomaly_detection_enabled": true,
-    "ip_reputation_enabled": true,
-    "fingerprinting_enabled": true,
-    "auto_blocking_enabled": true,
-    "custom_rules": [
-      {
-        "name": "admin_lockdown",
-        "path_pattern": "/api/v1/admin",
-        "max_score": 30,
-        "action": "Blocked"
-      },
-      {
-        "name": "public_lenient",
-        "path_pattern": "/api/v1/health",
-        "max_score": 95,
-        "action": "Allowed"
-      }
-    ]
-  }'
+curl -s http://localhost:8080/stats | jq '.last_hour.blocked'
+# 18
 ```
 
-**Response (200 OK):**
-
-```json
-{
-  "status": "updated",
-  "preset": "Strict",
-  "custom_rules_count": 2
-}
-```
-
-**curl Example (switch to Permissive, disable auto-blocking):**
+**Simple alerting script:**
 
 ```bash
-curl -s -X PUT http://localhost:9090/api/v1/shield/policy \
-  -H "Authorization: Bearer <token>" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "preset": "Permissive",
-    "sql_injection_enabled": true,
-    "anomaly_detection_enabled": false,
-    "ip_reputation_enabled": true,
-    "fingerprinting_enabled": false,
-    "auto_blocking_enabled": false,
-    "custom_rules": []
-  }'
+#!/bin/bash
+BLOCKED=$(curl -s http://localhost:8080/stats | jq '.last_5min.blocked')
+if [ "$BLOCKED" -gt 10 ]; then
+  echo "ALERT: $BLOCKED requests blocked in last 5 minutes"
+fi
 ```
 
-**Response (200 OK):**
+**Continuous monitoring (every 10 seconds):**
 
-```json
-{
-  "status": "updated",
-  "preset": "Permissive",
-  "custom_rules_count": 0
-}
+```bash
+watch -n 10 'curl -s http://localhost:8080/stats | jq .'
 ```
 
 ---
 
 ## Error Responses
 
-All endpoints return standard error responses for common failure cases.
+All endpoints pass through the NexusShield security middleware. Requests that trigger security policies will receive error responses instead of the expected endpoint data.
 
-**401 Unauthorized:**
+### Rate Limited (429)
 
-```json
-{
-  "error": "Authentication required"
-}
+```
+HTTP/1.1 429 Too Many Requests
+Retry-After: 60
+
+Rate limit exceeded
 ```
 
-**403 Forbidden:**
+The `Retry-After` header is included when the client IP is banned, indicating how many seconds until the ban expires.
 
-```json
-{
-  "error": "Admin access required"
-}
+### Blocked (403)
+
+```
+HTTP/1.1 403 Forbidden
+
+Request blocked by security policy
 ```
 
-**400 Bad Request:**
+Returned when the client's threat score exceeds the block threshold (default: 0.7).
 
-```json
-{
-  "error": "Invalid request body",
-  "details": "missing field `ip` at line 1 column 2"
-}
+### Upstream Unavailable (502)
+
+Only in proxy mode when the upstream service is unreachable:
+
+```
+HTTP/1.1 502 Bad Gateway
+
+Upstream unavailable
 ```
 
-**404 Not Found:**
+### Invalid Upstream URI (400)
 
-```json
-{
-  "error": "Resource not found"
-}
+Only in proxy mode when the constructed upstream URI is invalid:
+
 ```
+HTTP/1.1 400 Bad Request
 
-**500 Internal Server Error:**
-
-```json
-{
-  "error": "Internal server error"
-}
+Invalid upstream URI
 ```
 
 ---
 
-## Rate Limiting
+## Notes
 
-The shield API endpoints are subject to the server's global rate limiting:
-
-- **API endpoints:** 1000 requests per minute per IP
-- **Authentication endpoints:** 30 requests per minute per IP
-
-Shield endpoints are administrative in nature and should only be accessed by authorized operators. Excessive polling of the events or stats endpoints should be avoided in favor of reasonable intervals (e.g., every 5-10 seconds for dashboards).
+- All 4 endpoints (`/health`, `/status`, `/audit`, `/stats`) are registered as explicit routes and are handled directly by NexusShield, never forwarded to the upstream.
+- The audit endpoint returns a fixed maximum of 50 events. This is not configurable via query parameters.
+- Statistics are computed on-the-fly from the audit chain by scanning events with timestamps after the window boundary. There is no pre-aggregated counter.
+- The `chain_valid` field triggers a full chain verification on every call to `/status` and `/audit`. For chains with 100,000 events, this involves recomputing 100,000 SHA-256 hashes. In production with very large chains, consider polling this less frequently.
+- All timestamps in the `/audit` response use RFC 3339 format with UTC timezone.
+- The `/stats` time windows use the server's UTC clock. Ensure NTP synchronization for accurate window boundaries.

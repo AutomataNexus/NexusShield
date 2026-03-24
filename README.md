@@ -1,837 +1,984 @@
 <p align="center">
-  <img src="assets/NexusShield_logo.png" alt="NexusShield Logo" width="280" />
+  <img src="assets/NexusShield_logo.png" alt="NexusShield Logo" width="350" />
 </p>
 
 <h1 align="center">NexusShield</h1>
 
 <p align="center">
-  <strong>Real-time database security shield. Detect, block, and neutralize threats automatically.</strong>
+  <strong>Adaptive zero-trust security gateway for developer environments. Pure Rust.</strong>
 </p>
 
 <p align="center">
-  <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache--2.0-blue.svg" alt="License: Apache-2.0" /></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License: MIT" /></a>
   <img src="https://img.shields.io/badge/Rust-1.75%2B-orange.svg" alt="Rust 1.75+" />
   <img src="https://img.shields.io/badge/version-0.2.2-green.svg" alt="v0.2.2" />
-  <img src="https://img.shields.io/badge/tests-69-brightgreen.svg" alt="69 tests" />
-  <img src="https://img.shields.io/badge/LOC-2554-informational.svg" alt="2554 LOC" />
-  <img src="https://img.shields.io/badge/SQL%20injection%20patterns-38-red.svg" alt="38 SQL injection patterns" />
+  <img src="https://img.shields.io/badge/LOC-5182-informational.svg" alt="5182 LOC" />
+  <img src="https://img.shields.io/badge/modules-13-blueviolet.svg" alt="13 modules" />
 </p>
 
 ---
 
 ## Overview
 
-NexusShield is a comprehensive, real-time database security engine written in Rust. It operates as an inline middleware layer between your application and your database, inspecting every incoming request and SQL query before it reaches the data layer. When a threat is detected, NexusShield scores it, classifies it, and takes action --- blocking, rate-limiting, or allowing the request --- all within microseconds.
+NexusShield is a reverse-proxy security gateway that protects developer services running on laptops, desktops, and servers. It sits between incoming traffic and your upstream application, inspecting every request through a layered defense pipeline before forwarding clean traffic. When a threat is detected, NexusShield scores it, classifies it, and takes action -- blocking, rate-limiting, or warning -- all before the request ever reaches your service.
 
-### What It Does
+Unlike regex-based web application firewalls, NexusShield performs **AST-level SQL analysis** using the `sqlparser` crate, parsing queries into a full abstract syntax tree and walking the tree to detect injection patterns semantically. This eliminates false positives from string-matching heuristics and catches attacks that regex cannot see, such as tautology conditions buried inside nested subqueries, CHAR() encoding bypass, and hex-encoded payloads combined with SQL keywords.
 
-NexusShield combines six independent detection modules into a single scoring pipeline:
-
-1. **SQL Injection Detection** --- 38 compiled regex patterns covering UNION injection, stacked queries, time-based blind attacks, encoding evasion, metadata extraction, and more.
-2. **IP Reputation Tracking** --- Per-IP scoring from -100 (worst) to +100 (best), updated on every request. Tracks total requests, failed authentications, blocked requests, and threat events.
-3. **Request Fingerprinting** --- Classifies user-agents into Browser, ApiClient, Bot, Scanner, or Unknown. Detects 19 known scanner tools (sqlmap, nikto, Burp Suite, etc.) and applies heuristic suspicion scoring.
-4. **Anomaly Detection** --- Learns per-user/per-IP query rate baselines using exponential moving averages. After a configurable learning period, flags deviations that exceed the threshold.
-5. **Auto-Blocking** --- Automatically bans IPs that exceed the threat score threshold. Supports configurable ban durations, escalation multipliers, and manual overrides.
-6. **Live Threat Feed** --- Rolling in-memory event buffer with aggregated statistics, per-IP event counts, top offender tracking, and per-level/per-type breakdowns.
-
-### How It Works as Middleware
-
-NexusShield is designed to sit in your HTTP middleware chain. The typical integration looks like this:
-
-```rust
-// In your Axum/Actix/Warp middleware:
-let verdict = shield.analyze_request(&request_context);
-match verdict {
-    ShieldVerdict::Allow => { /* proceed to handler */ }
-    ShieldVerdict::Block { reason, threat_level } => {
-        return Err(forbidden(reason));
-    }
-    ShieldVerdict::RateLimit { delay_ms } => {
-        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-    }
-}
-
-// Later, in the query handler:
-let verdict = shield.analyze_query(&sql, &request_context);
-```
-
-### Why NexusShield Is Different
-
-- **Single-pass scoring**: All detection modules run in a single pass. No secondary lookups, no async waits.
-- **Zero allocations on the hot path**: Pattern matching uses pre-compiled regexes. Reputation lookups use `parking_lot::RwLock` for minimal contention.
-- **Composable verdicts**: The `ShieldVerdict` enum (Allow / Block / RateLimit) integrates cleanly with any web framework.
-- **Security presets**: Choose Strict, Moderate, or Permissive and get tuned thresholds out of the box. Override with custom rules for specific paths.
-- **No external dependencies at runtime**: No network calls, no database lookups, no file I/O. Everything runs in-process.
+NexusShield also uses **multi-signal threat scoring** to evaluate requests holistically. Four independent signals -- request fingerprinting (30%), rate pressure (25%), behavioral anomaly (30%), and recent violation history (15%) -- are combined into a single 0.0-1.0 threat score. The score determines whether a request is allowed, warned, or blocked. Adaptive rate limiting with 5-level escalation (None, Warn, Throttle, Block, Ban) automatically increases restrictions on repeat offenders and relaxes them over time through violation decay. Every security event is recorded in a tamper-evident SHA-256 hash-chained audit log where any modification or deletion breaks the chain and is immediately detectable.
 
 ---
 
 ## Architecture
 
 ```
-                    Incoming HTTP Request
-                           |
-                           v
-                  +------------------+
-                  |   Allowlist      |  <-- Bypass all checks for trusted IPs
-                  +------------------+
-                           |
-                    (not allowlisted)
-                           |
-                           v
-                  +------------------+
-                  |   Ban Check      |  <-- Is this IP currently banned?
-                  +------------------+
-                           |
-                    (not banned)
-                           |
-                           v
-                  +------------------+
-                  |  Auto-Blocker    |  <-- Active block entries (timed bans)
-                  +------------------+
-                           |
-                    (not blocked)
-                           |
-              +------------+------------+
-              |                         |
-              v                         v
-    +------------------+      +------------------+
-    |  Fingerprinting  |      |  IP Reputation   |
-    |  (User-Agent     |      |  (Score -100     |
-    |   classification)|      |   to +100)       |
-    +------------------+      +------------------+
-              |                         |
-              +------------+------------+
-                           |
-                    combined_score
-                           |
-                           v
-                  +------------------+
-                  |  Policy Engine   |  <-- Custom rules + preset thresholds
-                  +------------------+
-                           |
-              +------------+------------+------------+
-              |            |            |             |
-              v            v            v             v
-           ALLOW     RATE-LIMIT      BLOCK          BAN
-                                       |             |
-                                       v             v
-                                +------------------+
-                                |  Threat Feed     |  <-- Record event
-                                +------------------+
+                          Client Request
+                               |
+                               v
+                      +------------------+
+                      |   NexusShield    |
+                      |   (port 8080)    |
+                      +------------------+
+                               |
+              +----------------+----------------+
+              |                |                |
+              v                v                v
+     +--------------+  +--------------+  +--------------+
+     | Rate Governor|  | Fingerprint  |  | SQL Firewall |
+     | (token       |  | (header      |  | (AST-level   |
+     |  bucket +    |  |  analysis +  |  |  sqlparser   |
+     |  escalation) |  |  bot detect) |  |  analysis)   |
+     +--------------+  +--------------+  +--------------+
+              |                |                |
+              v                v                v
+     +--------------+  +--------------+  +--------------+
+     | SSRF Guard   |  | Email Guard  |  | Data         |
+     | (IP/DNS/port |  | (CRLF, rate, |  | Quarantine   |
+     |  validation) |  |  injection)  |  | (CSV/JSON)   |
+     +--------------+  +--------------+  +--------------+
+              |                |                |
+              +----------------+----------------+
+                               |
+                               v
+                      +------------------+
+                      | Threat Score     |
+                      | Engine           |
+                      | (multi-signal    |
+                      |  0.0 - 1.0)      |
+                      +------------------+
+                               |
+                     +---------+---------+
+                     |         |         |
+                     v         v         v
+                  ALLOW      WARN      BLOCK
+                     |                   |
+                     v                   v
+              +--------------+   +--------------+
+              | Audit Chain  |   | Audit Chain  |
+              | (record)     |   | (record)     |
+              +--------------+   +--------------+
+                     |
+                     v
+              +--------------+
+              | Upstream     |
+              | Service      |
+              | (port 3000)  |
+              +--------------+
+```
 
+### Request Flow (Middleware Pipeline)
 
-                    SQL Query Analysis
-                           |
-                           v
-                  +------------------+
-                  | SQL Injection    |  <-- 38 regex patterns, score 0-100
-                  | Detector         |
-                  +------------------+
-                           |
-                           v
-                  +------------------+
-                  | Anomaly          |  <-- Baseline deviation analysis
-                  | Detector         |
-                  +------------------+
-                           |
-                    combined_score
-                           |
-                           v
-                  +------------------+
-                  |  Policy Engine   |  <-- Same policy as request analysis
-                  +------------------+
-                           |
-              +------------+------------+
-              |            |            |
-              v            v            v
-           ALLOW     RATE-LIMIT      BLOCK
+```
+Client --> NexusShield Gateway
+              |
+              +--> [1] Rate Governor    -- token bucket per IP, escalation check
+              +--> [2] Fingerprinter    -- header analysis, bot/tool detection
+              +--> [3] Behavioral Score -- request rate, error rate, burst detection
+              +--> [4] Violation Check  -- recent audit chain events
+              +--> [5] Threat Score     -- weighted combination of all signals
+              |         |
+              |    score < 0.4 --> ALLOW --> forward to upstream
+              |    score 0.4-0.7 --> WARN --> log + forward to upstream
+              |    score >= 0.7 --> BLOCK --> 403 Forbidden
+              |
+              +--> [6] Response Tracking -- record errors for behavioral analysis
 ```
 
 ---
 
-## Threat Detection Capabilities
+## Features
 
-### SQL Injection Detection
+### 1. SQL Firewall (AST-Level Analysis)
 
-The `SqlInjectionDetector` holds 38 pre-compiled regex patterns organized into categories. Each pattern has a name, a score (0-100), and a description. When a query matches multiple patterns, scores are summed and capped at 100.
+**File:** `src/sql_firewall.rs`
 
-#### UNION / Subquery Injection
+The SQL firewall parses every query into an Abstract Syntax Tree using the `sqlparser` crate's `GenericDialect` parser. It then walks the AST recursively, inspecting every node for injection patterns. This is fundamentally different from regex-based detection because it understands SQL structure.
 
-| # | Pattern | Score | Description |
-|---|---------|-------|-------------|
-| 1 | `union_select` | 90 | `UNION [ALL] SELECT` injection |
+**Detection categories:**
 
-#### Tautology / Always-True Conditions
+| Category | Violation Type | Risk Score | Description |
+|----------|---------------|------------|-------------|
+| UNION injection | `UnionInjection` | +0.6 | Detects `UNION SELECT` operations in `SetOperation` AST nodes |
+| Stacked queries | `StackedQueries` | +0.8 | Multiple statements separated by semicolons |
+| Dangerous functions | `DangerousFunction` | +0.8 | 30+ built-in dangerous functions detected in `Function` AST nodes |
+| System table access | `SystemTableAccess` | +0.7 | Queries against `information_schema`, `pg_catalog`, `sqlite_master`, etc. |
+| Tautology detection | `Tautology` | +0.5 | `1=1`, `'a'='a'`, `OR TRUE` detected via `BinaryOp` equality comparison |
+| INTO OUTFILE | `IntoOutfile` | +1.0 | `SELECT INTO` / `INTO OUTFILE` / `INTO DUMPFILE` |
+| Comment injection | `CommentInjection` | +0.3 | `/* */` block comments and `--` line comments (outside string literals) |
+| Hex-encoded payloads | `HexEncodedPayload` | +0.4 | `0x` hex values combined with SQL keywords |
+| CHAR() bypass | `CharEncoding` | +0.3 | `CHAR()`, `CHR()`, `CONCAT()` combined with SQL keywords |
+| Non-SELECT statements | `NonSelectStatement` | +1.0 | INSERT, UPDATE, DELETE, DROP, ALTER, TRUNCATE, GRANT, REVOKE |
+| Excessive nesting | `ExcessiveNesting` | +0.4 | Subquery depth exceeds configurable limit (default: 3) |
+| Query too long | `QueryTooLong` | +0.5 | Exceeds `max_query_length` (default: 10,000 bytes) |
+| Unparseable SQL | `Unparseable` | 1.0 | Query fails to parse (highly suspicious) |
 
-| # | Pattern | Score | Description |
-|---|---------|-------|-------------|
-| 2 | `or_always_true` | 85 | `OR 1=1` or `OR '1'='1'` always-true condition |
-| 19 | `boolean_and` | 70 | `AND 1=1` boolean-based blind injection |
-| 36 | `tautology_string` | 85 | String tautology `OR 'a'='a'` |
+**Built-in dangerous functions list (30+):**
 
-#### Stacked Queries (Piggyback Injection)
+- **MySQL file ops:** `load_file`, `into_outfile`, `into_dumpfile`
+- **PostgreSQL file ops:** `pg_read_file`, `pg_read_binary_file`, `pg_ls_dir`, `pg_stat_file`, `lo_import`, `lo_export`, `pg_file_write`
+- **PostgreSQL command exec:** `pg_execute_server_program`
+- **SQL Server command exec:** `xp_cmdshell`, `sp_oacreate`, `sp_oamethod`
+- **MySQL UDF:** `sys_exec`, `sys_eval`
+- **Time-based blind:** `sleep`, `benchmark`, `waitfor`, `pg_sleep`
+- **XML injection:** `extractvalue`, `updatexml`
+- **SQLite:** `load_extension`
 
-| # | Pattern | Score | Description |
-|---|---------|-------|-------------|
-| 3 | `stacked_drop` | 95 | `; DROP ...` stacked query |
-| 4 | `stacked_delete` | 95 | `; DELETE ...` stacked query |
-| 5 | `stacked_insert` | 90 | `; INSERT ...` stacked query |
-| 6 | `stacked_update` | 90 | `; UPDATE ...` stacked query |
-| 20 | `string_termination` | 90 | Quote + semicolon followed by DDL/DML command |
-| 33 | `alter_table` | 90 | `; ALTER TABLE` stacked DDL |
-| 34 | `create_stacked` | 90 | `; CREATE TABLE/DATABASE/USER` |
+**System schemas/catalogs blocked:**
 
-#### Comment Injection
+`information_schema`, `pg_catalog`, `pg_temp`, `pg_toast`, `sys`, `mysql`, `performance_schema`, `sqlite_master`, `sqlite_schema`, `sqlite_temp_master`, `master`, `tempdb`, `msdb`, `model`
 
-| # | Pattern | Score | Description |
-|---|---------|-------|-------------|
-| 7 | `comment_dash` | 60 | Trailing `--` single-line comment |
-| 8 | `comment_block` | 60 | `/* ... */` block comment |
-| 9 | `comment_hash` | 60 | Trailing `#` hash comment (MySQL) |
-| 10 | `nested_comment` | 65 | Nested `/* ... /* ...` comments |
+**AST walk covers:**
+- `SELECT` projection expressions (function calls in select list)
+- `FROM` clauses (table names, derived tables, nested joins)
+- `WHERE` clauses (tautology detection + dangerous functions)
+- `HAVING` clauses
+- `CASE` / `BETWEEN` / `EXISTS` / `IN (subquery)` expressions
+- `CAST` expressions
+- `BinaryOp` / `UnaryOp` / `Nested` expression recursion
+- Subqueries at any depth
 
-#### Time-Based Blind Injection
+**Configuration (`SqlFirewallConfig`):**
 
-| # | Pattern | Score | Description |
-|---|---------|-------|-------------|
-| 11 | `sleep_fn` | 80 | `SLEEP()` timing attack (MySQL) |
-| 12 | `benchmark_fn` | 80 | `BENCHMARK()` timing attack (MySQL) |
-| 13 | `waitfor_delay` | 80 | `WAITFOR DELAY` timing attack (MSSQL) |
-| 24 | `pg_sleep` | 80 | `pg_sleep()` timing attack (PostgreSQL) |
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `allow_comments` | `bool` | `false` | Allow SQL comments in queries |
+| `max_query_length` | `usize` | `10,000` | Maximum query length in bytes |
+| `max_subquery_depth` | `u32` | `3` | Maximum nesting depth for subqueries |
+| `blocked_functions` | `Vec<String>` | `[]` | Additional function names to block |
+| `blocked_schemas` | `Vec<String>` | `[]` | Additional schema names to block |
 
-#### File System Access
+---
 
-| # | Pattern | Score | Description |
-|---|---------|-------|-------------|
-| 14 | `load_file` | 90 | `LOAD_FILE()` read server files |
-| 15 | `into_outfile` | 90 | `INTO OUTFILE/DUMPFILE` write server files |
+### 2. SSRF Guard
 
-#### String Obfuscation / Encoding Evasion
+**File:** `src/ssrf_guard.rs`
 
-| # | Pattern | Score | Description |
-|---|---------|-------|-------------|
-| 16 | `char_obfuscation` | 70 | `CHAR(97,100,109)` obfuscation |
-| 17 | `concat_obfuscation` | 70 | `CONCAT()` string building |
-| 18 | `hex_encoding` | 75 | `0x61646D696E` hex-encoded values |
-| 30 | `double_encode` | 75 | `%2527` double URL-encoded quotes |
-| 31 | `unicode_encode` | 75 | `\u0027` / `%u0027` Unicode-encoded quotes |
+Validates URLs and IP addresses to prevent Server-Side Request Forgery attacks. Blocks access to internal networks, cloud metadata endpoints, and dangerous ports.
 
-#### Stored Procedure / Command Execution
+**IP ranges blocked:**
 
-| # | Pattern | Score | Description |
-|---|---------|-------|-------------|
-| 21 | `exec_proc` | 90 | `EXEC xp_` / `EXECUTE sp_` stored procedures |
-| 22 | `xp_cmdshell` | 95 | `xp_cmdshell` OS command execution |
-| 35 | `shutdown_cmd` | 95 | `SHUTDOWN` command |
+| Range | Description |
+|-------|-------------|
+| `127.0.0.0/8` | Loopback addresses |
+| `10.0.0.0/8` | Private network (Class A) |
+| `172.16.0.0/12` | Private network (Class B) |
+| `192.168.0.0/16` | Private network (Class C) |
+| `169.254.0.0/16` | Link-local (including cloud metadata at `169.254.169.254`) |
+| `0.0.0.0` | Unspecified address |
+| `255.255.255.255` | Broadcast address |
+| `::1` | IPv6 loopback |
+| `::` | IPv6 unspecified |
+| `fe80::/10` | IPv6 link-local |
+| `::ffff:x.x.x.x` | IPv4-mapped IPv6 (checks the embedded IPv4) |
 
-#### Metadata / Schema Extraction
+**Hostname blocking:**
 
-| # | Pattern | Score | Description |
-|---|---------|-------|-------------|
-| 23 | `information_schema` | 75 | `INFORMATION_SCHEMA` metadata access |
+- `localhost`, `localhost.localdomain`, `*.localhost`
+- Cloud metadata: `metadata.google.internal`, `metadata.google`, `instance-data`
+- Internal TLDs: `.internal`, `.local`, `.corp`, `.home`, `.lan`
 
-#### Clause Injection
+**Scheme validation:**
 
-| # | Pattern | Score | Description |
-|---|---------|-------|-------------|
-| 25 | `having_injection` | 70 | `HAVING 1=1` clause injection |
-| 26 | `order_by_enum` | 60 | `ORDER BY 99` column enumeration |
-| 27 | `group_by_having` | 50 | `GROUP BY ... HAVING` combined injection |
+Only `http` and `https` are allowed by default. Blocks `file://`, `ftp://`, `gopher://`, etc.
 
-#### XML / Function Injection
+**Blocked ports (common internal services):**
 
-| # | Pattern | Score | Description |
-|---|---------|-------|-------------|
-| 28 | `xml_extract` | 85 | `EXTRACTVALUE()` / `UPDATEXML()` XML injection |
-| 29 | `convert_cast` | 40 | `CONVERT/CAST ... AS ...` type coercion |
-| 37 | `if_blind` | 70 | `IF(condition, true, false)` blind injection |
+`22` (SSH), `23` (Telnet), `25` (SMTP), `53` (DNS), `111` (RPC), `135` (MSRPC), `139` (NetBIOS), `445` (SMB), `514` (Syslog), `873` (Rsync), `2049` (NFS), `3306` (MySQL), `5432` (PostgreSQL), `6379`/`6380` (Redis), `9200`/`9300` (Elasticsearch), `11211` (Memcached), `27017`/`27018` (MongoDB), `50070` (HDFS)
 
-#### Other
+**Allowlist/Blocklist:**
 
-| # | Pattern | Score | Description |
-|---|---------|-------|-------------|
-| 32 | `into_var` | 70 | `INTO @variable` assignment |
-| 38 | `like_wildcard` | 30 | `LIKE '%'` wildcard abuse |
+- Explicit `allowlist` bypasses all checks for trusted hosts/IPs
+- Explicit `blocklist` is checked before allowlist
 
-### IP Reputation
+**Configuration (`SsrfConfig`):**
 
-Every IP address that interacts with NexusShield gets a reputation record with the following fields:
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `block_private_ips` | `bool` | `true` | Block RFC 1918 private ranges |
+| `block_loopback` | `bool` | `true` | Block 127.0.0.0/8 and ::1 |
+| `block_link_local` | `bool` | `true` | Block 169.254.0.0/16 |
+| `block_metadata_endpoints` | `bool` | `true` | Block cloud metadata endpoints |
+| `allowed_schemes` | `Vec<String>` | `["http", "https"]` | Allowed URL schemes |
+| `allowlist` | `HashSet<String>` | `{}` | Hosts/IPs that bypass all checks |
+| `blocklist` | `HashSet<String>` | `{}` | Hosts/IPs always blocked |
+| `blocked_ports` | `Vec<u16>` | (22 ports) | Blocked port numbers |
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `score` | `i32` | -100 (worst) to +100 (best), starts at 0 |
-| `total_requests` | `u64` | Total requests from this IP |
-| `failed_auths` | `u64` | Failed authentication attempts |
-| `blocked_requests` | `u64` | Requests blocked by shield |
-| `threat_events` | `u64` | Threat events generated |
-| `first_seen` | `i64` | Unix timestamp of first request |
-| `last_seen` | `i64` | Unix timestamp of last request |
-| `banned_until` | `Option<u64>` | Epoch seconds ban expiry, or None |
-| `ban_reason` | `Option<String>` | Reason for current ban |
+---
 
-**Scoring Mechanics:**
+### 3. Email Guard
 
-- Each normal request: `+1` to score (capped at +100)
-- Each failed authentication: `-10` to score
-- Each blocked request: `-20` to score
-- Each threat event: `-(threat_score / 10)` to score
-- Score clamped to range `[-100, +100]`
+**File:** `src/email_guard.rs`
 
-**Reputation-based scoring in request analysis:**
+Protects email-sending endpoints from header injection, bombing attacks, HTML/template injection, and address abuse.
 
-- Score below `-50`: adds `+30` to combined threat score
-- Score below `-20`: adds `+15` to combined threat score
+**Detection capabilities:**
 
-### Request Fingerprinting
+| Attack Vector | Detection Method |
+|--------------|-----------------|
+| CRLF header injection | Scans for `\r` and `\n` in addresses, subjects, names |
+| Email bombing | Per-recipient rate limiting (default: 5 emails per recipient per 5 minutes) |
+| HTML/script injection | Detects 23+ patterns in template content (see below) |
+| Encoded payloads | Base64-encoded attack strings, Unicode BiDi overrides, zero-width characters |
+| Disposable domains | Blocks 10 known disposable email services + localhost/internal domains |
+| IP address domains | Blocks `[127.0.0.1]` style email addresses |
+| Content length limits | Per-field max lengths (subject: 200, body: 10,000, name: 100) |
+| Null byte injection | Blocks null bytes in addresses and headers |
+| Excessive recipients | Configurable max recipients per email (default: 10) |
 
-The `RequestFingerprinter` classifies every incoming request into one of five user-agent classes:
+**HTML injection patterns blocked in template content:**
 
-| Class | Description | Base Suspicion Score |
-|-------|-------------|---------------------|
-| `Browser` | Standard web browsers (Chrome, Firefox, Safari, Edge, Opera) | 0 |
-| `ApiClient` | HTTP clients (curl, wget, Postman, Insomnia, axios, python-requests, etc.) | 0 |
-| `Bot` | Search engine crawlers (Googlebot, Bingbot, etc.) | 20 |
-| `Scanner` | Known security scanners and attack tools | 90 |
-| `Unknown` | Unrecognized or missing user-agent | 40 |
+`<script`, `</script`, `javascript:`, `vbscript:`, `data:text/html`, `onerror=`, `onload=`, `onclick=`, `onmouseover=`, `onfocus=`, `onblur=`, `eval(`, `expression(`, `url(data:`, `<iframe`, `<object`, `<embed`, `<form`, `<input`, `<meta`, `<link`, `<base`, `<svg`, `<!--`, `srcdoc=`
 
-**Detected Scanners (19 signatures):**
+**Encoded attack detection:**
 
-- `sqlmap` --- SQL injection automation tool
-- `nikto` --- Web server vulnerability scanner
-- `nmap` --- Network discovery and security auditing
-- `masscan` --- Internet-scale port scanner
-- `gobuster` --- Directory/file brute-forcer
-- `dirbuster` --- Web application directory brute-forcer
-- `wfuzz` --- Web application fuzzer
-- `hydra` --- Network login brute-forcer
-- `burpsuite` / `burp suite` --- Web vulnerability scanner and proxy
-- `owasp zap` / `zaproxy` --- OWASP Zed Attack Proxy
-- `w3af` --- Web application attack and audit framework
-- `arachni` --- Web application security scanner
-- `skipfish` --- Active web application security reconnaissance
-- `havij` --- Automated SQL injection tool
-- `acunetix` --- Web vulnerability scanner
-- `nessus` --- Vulnerability assessment scanner
-- `openvas` --- Open vulnerability assessment system
+- Base64-encoded `<script>`, `javascript:`, `<svg`, `>alert(`
+- Unicode right-to-left override (`U+202E`), right-to-left mark (`U+200F`), left-to-right mark (`U+200E`)
+- Zero-width characters: `U+200B` (zero-width space), `U+FEFF` (BOM), `U+200C` (zero-width non-joiner), `U+200D` (zero-width joiner)
 
-**Detected Bots (15 signatures):**
+**Blocked email domains:**
 
-- `googlebot`, `bingbot`, `baiduspider`, `yandexbot`, `duckduckbot`
-- `slurp`, `ia_archiver`, `facebot`, `twitterbot`, `linkedinbot`
-- `semrushbot`, `ahrefsbot`, `mj12bot`, `dotbot`, `petalbot`
+`localhost`, `127.0.0.1`, `0.0.0.0`, `[::1]`, `internal`, `local`, `corp`, `mailinator.com`, `guerrillamail.com`, `tempmail.com`, `throwaway.email`, `yopmail.com`, `sharklasers.com`, `guerrillamailblock.com`, `grr.la`, `dispostable.com`, `trashmail.com`
 
-**Detected API Clients (10 signatures):**
+**HTML escaping:**
 
-- `curl`, `wget`, `httpie`, `postman`, `insomnia`
-- `axios`, `python-requests`, `go-http-client`, `java/`, `okhttp`
+The `html_escape()` function escapes `&`, `<`, `>`, `"`, `'`, `/` and strips null bytes for safe template interpolation.
 
-**Heuristic Scoring Adjustments:**
+**Configuration (`EmailGuardConfig`):**
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `max_per_recipient` | `u32` | `5` | Max emails per recipient per window |
+| `rate_window_secs` | `u64` | `300` | Rate limiting window (5 minutes) |
+| `max_recipients` | `u32` | `10` | Max recipients per single email |
+| `max_subject_len` | `usize` | `200` | Maximum subject length |
+| `max_body_len` | `usize` | `10,000` | Maximum body/message field length |
+| `max_name_len` | `usize` | `100` | Maximum name field length |
+| `blocked_domains` | `Vec<String>` | (17 domains) | Blocked email domains |
+
+---
+
+### 4. Behavioral Fingerprinting
+
+**File:** `src/fingerprint.rs`
+
+Extracts features from HTTP request headers to build a behavioral fingerprint. Automated attack tools have distinctive patterns: missing standard headers, unusual header ordering, rapid request cadence, and known tool user-agent strings.
+
+**Per-request signals extracted:**
+
+| Signal | Description |
+|--------|-------------|
+| `has_user_agent` | Whether `User-Agent` header is present |
+| `has_accept` | Whether `Accept` header is present |
+| `has_accept_language` | Whether `Accept-Language` header is present |
+| `has_accept_encoding` | Whether `Accept-Encoding` header is present |
+| `has_referer` | Whether `Referer` header is present |
+| `header_count` | Total number of headers |
+| `header_order_hash` | SHA-256 hash of header names in order (first 16 hex chars) |
+| `user_agent` | User-Agent string (truncated to 200 chars) |
+
+**Anomaly score calculation:**
 
 | Condition | Score Added |
 |-----------|-----------|
-| Unrecognized user-agent | +15 |
-| User-agent shorter than 10 chars | +10 |
-| Missing/empty user-agent | +40 (returned immediately as Unknown) |
-| 4+ values in `X-Forwarded-For` | +15 |
-| Browser UA missing `Accept` header | +10 |
+| Missing `User-Agent` header | +0.3 |
+| Missing `Accept` header | +0.1 |
+| Missing `Accept-Language` header | +0.1 |
+| Missing `Accept-Encoding` header | +0.05 |
+| Fewer than 3 headers | +0.25 |
+| More than 30 headers (proxy chain / header stuffing) | +0.15 |
+| Known attack tool user-agent | +0.4 |
+| Empty user-agent string | +0.2 |
 
-### Anomaly Detection
+**Known attack tools detected (14 signatures):**
 
-The `QueryAnomalyDetector` builds per-identifier (IP or authenticated user) baselines using an exponential moving average of query rate:
+`sqlmap`, `nikto`, `nmap`, `masscan`, `zgrab`, `gobuster`, `dirbuster`, `wfuzz`, `ffuf`, `nuclei`, `httpx`, `python-requests`, `go-http-client`, `java/`
 
-```
-alpha = 0.1
-avg_rate = avg_rate * (1 - alpha) + current_rate * alpha
-```
+**Behavioral tracking (per-IP over time):**
 
-**Learning Period:**
-- Configurable via `anomaly_learning_period_secs` (default: 3600s for Moderate)
-- Also requires at least 100 samples before flagging anomalies
-- During learning, all queries are allowed and the baseline is built silently
+| Condition | Score Added |
+|-----------|-----------|
+| Request rate > 20 RPS | +0.3 |
+| Request rate > 100 RPS | +0.3 (additional) |
+| Error rate > 50% (after 5+ requests) | +0.3 |
+| 50+ requests in < 5 seconds (burst) | +0.4 |
+| 20+ distinct endpoints in < 30 seconds (scanning) | +0.2 |
+| 5+ distinct source types (enumeration) | +0.2 |
 
-**Deviation Scoring:**
-- If `current_rate / baseline_rate > deviation_threshold`, the query is flagged
-- Score formula: `min((deviation / threshold) * 30, 80)`
-- Anomaly events with score >= 30 are recorded in the threat feed
-
-### Auto-Blocking
-
-The `AutoBlocker` manages timed IP bans with allowlist support:
-
-- **Automatic blocking**: When a threat score exceeds `auto_block_threshold`, the IP is blocked for `default_ban_duration_secs`
-- **Brute force escalation**: After 10 failed authentication attempts from a single IP, the IP is automatically banned
-- **Allowlist bypass**: IPs on the allowlist are never blocked, regardless of threat score
-- **Expiry management**: `cleanup_expired()` removes expired blocks; call periodically or on a timer
-- **Manual control**: Block/unblock IPs programmatically with custom reasons and durations
+**Fingerprint hash:** SHA-256 of `ua + header_count + header_order_hash + accept + lang` (first 32 hex chars). Stable across identical request profiles.
 
 ---
 
-## Security Presets
+### 5. Adaptive Rate Limiting
 
-Three presets provide tuned defaults for different security postures:
+**File:** `src/rate_governor.rs`
 
-| Setting | Strict | Moderate | Permissive |
-|---------|--------|----------|------------|
-| `enabled` | `true` | `true` | `true` |
-| `sql_injection_enabled` | `true` | `true` | `true` |
-| `anomaly_detection_enabled` | `true` | `true` | `true` |
-| `ip_reputation_enabled` | `true` | `true` | `true` |
-| `fingerprinting_enabled` | `true` | `true` | `true` |
-| `auto_blocking_enabled` | `true` | `true` | `false` |
-| `auto_block_threshold` | 60 | 80 | 95 |
-| `default_ban_duration_secs` | 7200 (2h) | 3600 (1h) | 300 (5m) |
-| `max_ban_duration_secs` | 172800 (48h) | 86400 (24h) | 3600 (1h) |
-| `escalation_multiplier` | 3.0 | 2.0 | 1.5 |
-| `max_events_in_memory` | 20000 | 10000 | 5000 |
-| `anomaly_learning_period_secs` | 1800 (30m) | 3600 (1h) | 7200 (2h) |
-| `anomaly_deviation_threshold` | 2.0x | 3.0x | 5.0x |
-| `cleanup_interval_secs` | 120 (2m) | 300 (5m) | 600 (10m) |
-| **Policy: block threshold** | 60 | 80 | 95 |
-| **Policy: rate-limit threshold** | 30 | 50 | 70 |
+Per-IP token bucket rate limiter with automatic escalation. Well-behaved clients get full capacity; repeat violators get progressively restricted up to temporary bans.
+
+**Token bucket algorithm:**
+
+- Each IP gets a bucket with `burst_capacity` tokens (default: 100)
+- Tokens refill at `requests_per_second` rate (default: 50/s)
+- Each request consumes 1 token
+- When the bucket is empty, the request is denied and a violation is recorded
+
+**5-level escalation:**
+
+| Level | Violations Required | Behavior |
+|-------|-------------------|----------|
+| **None** | 0 | Normal operation |
+| **Warn** | 3+ | Allowed but logged |
+| **Throttle** | 8+ | Only allowed if bucket > 50% full |
+| **Block** | 15+ | All requests denied |
+| **Ban** | 30+ | All requests denied for `ban_duration_secs` (default: 300s) |
+
+**Violation decay:** Every `violation_decay_secs` (default: 60s) without a new violation, one violation is removed. This allows clients to recover from temporary spikes.
+
+**Manual controls:**
+
+- `ban_ip(ip)` -- Manually ban an IP for the configured ban duration
+- `unban_ip(ip)` -- Remove ban and reset violations to 0
+- `peek_escalation(ip)` -- Check escalation level without consuming a token
+
+**Ban expiry:** Bans automatically expire after `ban_duration_secs`. The ban flag is cleared on the next request check after expiry.
+
+**Stale pruning:** Background task prunes IP state for clients not seen in 600 seconds (runs every 60 seconds).
+
+**Configuration (`RateConfig`):**
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `requests_per_second` | `f64` | `50.0` | Token refill rate per IP |
+| `burst_capacity` | `f64` | `100.0` | Maximum tokens (burst allowance) |
+| `warn_after` | `u32` | `3` | Violations before warn escalation |
+| `throttle_after` | `u32` | `8` | Violations before throttle escalation |
+| `block_after` | `u32` | `15` | Violations before block escalation |
+| `ban_after` | `u32` | `30` | Violations before ban escalation |
+| `ban_duration_secs` | `u64` | `300` | Ban duration (5 minutes) |
+| `violation_decay_secs` | `u64` | `60` | Seconds between violation decay |
+
+---
+
+### 6. Data Quarantine
+
+**File:** `src/quarantine.rs`
+
+Validates imported data (CSV and JSON) for malicious payloads before they enter the system.
+
+**CSV validation checks:**
+
+| Check | Description |
+|-------|-------------|
+| Formula injection | Cells starting with `=`, `@`, `\t`, `\r` are blocked. `+` and `-` are only blocked if not followed by a valid number. |
+| Embedded scripts | `<script`, `javascript:`, `onerror=`, `onload=`, `onclick=`, `vbscript:`, `data:text/html` |
+| Null bytes | Any `\0` character in content |
+| Size limit | Total byte size (default: 500 MB) |
+| Row limit | Maximum rows (default: 5,000,000) |
+| Column limit | Maximum columns from header (default: 500) |
+| Repetitive patterns | Content with < 5 unique characters in first 1000 bytes and > 10KB total (padding attack) |
+
+**JSON validation:** Size check + null byte detection + embedded script detection.
+
+**Performance:** Only scans the first 10,000 rows of CSV data (attackers typically inject early in the payload).
+
+**Configuration (`QuarantineConfig`):**
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `max_rows` | `usize` | `5,000,000` | Maximum rows allowed |
+| `max_size_bytes` | `usize` | `524,288,000` | Maximum total size (500 MB) |
+| `max_columns` | `usize` | `500` | Maximum columns allowed |
+| `check_formula_injection` | `bool` | `true` | Enable formula injection checks |
+| `check_embedded_scripts` | `bool` | `true` | Enable embedded script checks |
+
+---
+
+### 7. Credential Vault
+
+**File:** `src/credential_vault.rs`
+
+Encrypts sensitive configuration fields with AES-256-GCM before storage. Uses per-user key derivation so each user's credentials are isolated.
+
+**Key hierarchy:**
+
+```
+NEXUS_VAULT_KEY (env var, 32+ chars)
+  |
+  +-- SHA-256(master_key + ":user:" + user_id) --> per-user 256-bit key
+        |
+        +-- AES-256-GCM(key, random_12_byte_nonce, plaintext) --> ciphertext
+```
+
+**Encrypted value format:** `vault:v1:<base64(nonce + ciphertext)>`
+
+**Sensitive fields automatically detected:**
+
+`api_key`, `token`, `connection_string`, `password`, `secret`, `api_secret`, `access_key`, `secret_key`
+
+**Operations:**
+
+| Function | Description |
+|----------|-------------|
+| `encrypt_source_config(config, user_id)` | Encrypts all sensitive fields in a JSON object |
+| `decrypt_source_config(config, user_id)` | Decrypts all sensitive fields |
+| `redact_source_config(config)` | Masks secrets for API display (first 4 + last 2 chars visible) |
+| `is_encrypted(value)` | Checks if a value has the `vault:v1:` prefix |
+
+**Graceful degradation:** If `NEXUS_VAULT_KEY` is not set, credentials are stored unencrypted (for development environments). A warning is logged.
+
+**Safety guarantees:**
+- Already-encrypted fields are not re-encrypted (idempotent)
+- Empty fields are not encrypted
+- Non-sensitive fields (like `database`, `collection`) pass through unchanged
+- Wrong user key fails decryption (per-user isolation)
+
+---
+
+### 8. Tamper-Evident Audit Chain
+
+**File:** `src/audit_chain.rs`
+
+SHA-256 hash-chained append-only security event log. Each event includes the hash of the previous event, forming a chain. If any event is modified, inserted, or deleted, the chain breaks.
+
+**Hash computation:**
+
+```
+hash = SHA-256(id | timestamp | event_type | source_ip | details | threat_score | previous_hash)
+```
+
+The first event in the chain links to the genesis hash `"genesis"`.
+
+**Security event types:**
+
+| Event Type | Description |
+|------------|-------------|
+| `RequestAllowed` | Request passed all checks |
+| `RequestBlocked` | Request blocked by threat score |
+| `RateLimitHit` | Request denied by rate governor |
+| `SqlInjectionAttempt` | SQL firewall detected injection |
+| `SsrfAttempt` | SSRF guard blocked a URL/IP |
+| `PathTraversalAttempt` | Path traversal detected |
+| `MaliciousPayload` | Malicious content detected |
+| `DataQuarantined` | Imported data failed quarantine |
+| `AuthFailure` | Authentication failure |
+| `BanIssued` | IP ban applied |
+| `BanLifted` | IP ban removed |
+| `ChainVerified` | Chain integrity verified |
+
+**Chain verification:** `verify_chain()` recomputes every hash from event data and verifies the chain links. Returns the index of the first broken link if tampering is detected.
+
+**Pruning:** When the chain exceeds `audit_max_events` (default: 100,000), oldest events are drained from the head.
+
+**Query methods:**
+
+| Method | Description |
+|--------|-------------|
+| `record(type, ip, details, score)` | Append a new event |
+| `verify_chain()` | Full integrity verification |
+| `recent(count)` | Get N most recent events (newest first) |
+| `count_since(type, timestamp)` | Count events of a type since a time |
+| `export_json()` | Export entire chain as JSON |
+| `len()` / `is_empty()` | Chain size |
+
+---
+
+### 9. Input Sanitizer
+
+**File:** `src/sanitizer.rs`
+
+Validates connection strings, file paths, and sanitizes error messages to prevent information leakage.
+
+**Connection string validation:**
+
+| Check | Blocked Content |
+|-------|----------------|
+| Shell metacharacters | `` ` ``, `$`, `|`, `&`, `;`, `\n`, `\r`, `\0` |
+| Command substitution | `$(...)`, `${...}` |
+| Dangerous URL parameters | `sslrootcert=/etc`, `sslcert=/proc`, `init_command=`, `options=-c`, `application_name=';` |
+| URL format | Must be parseable as a valid URL |
+
+**File path validation:**
+
+| Check | Description |
+|-------|-------------|
+| Path traversal | Blocks `..` in any path |
+| Null bytes | Blocks `\0` |
+| Sensitive directories | `/etc/`, `/proc/`, `/sys/`, `/dev/`, `/root/`, `/boot/`, `/var/run/`, `/var/log/`, `/tmp/.`, `/home/`, `C:\Windows\`, `C:\Users\` |
+| Sensitive filenames | `passwd`, `shadow`, `id_rsa`, `id_ed25519`, `authorized_keys`, `.ssh`, `.env`, `.git`, `credentials`, `secret`, `.bash_history`, `.pgpass`, `.my.cnf`, `wp-config.php` |
+| Relative paths | Must be absolute (starts with `/` or drive letter) |
+
+**Error message sanitization:**
+
+| Redaction | Description |
+|-----------|-------------|
+| Internal paths | Unix paths with 2+ `/` separators replaced with `[path redacted]` |
+| Internal IPs | `10.x.x.x`, `172.16-31.x.x`, `192.168.x.x` replaced with `[internal-ip]` |
+| Stack traces | Lines starting with `at `, `thread '...panicked at`, `stack backtrace:` removed |
+| Length limit | Truncated to 500 characters |
+
+**Header sanitization:** `sanitize_header_value()` strips `\r`, `\n`, and `\0` to prevent header injection.
+
+---
+
+### 10. Multi-Signal Threat Scoring
+
+**File:** `src/threat_score.rs`
+
+Combines four independent signals into a single 0.0-1.0 threat score using weighted averaging.
+
+**Signal weights:**
+
+| Signal | Weight | Source |
+|--------|--------|--------|
+| Fingerprint anomaly | 30% | `fingerprint.rs` -- header analysis + bot detection |
+| Rate pressure | 25% | `rate_governor.rs` -- escalation level mapped to 0.0-1.0 |
+| Behavioral anomaly | 30% | `fingerprint.rs` -- request rate, error rate, burst detection |
+| Recent violations | 15% | `audit_chain.rs` -- any blocked requests in last 5 minutes |
+
+**Rate pressure mapping:**
+
+| Escalation Level | Score |
+|-----------------|-------|
+| None | 0.0 |
+| Warn | 0.3 |
+| Throttle | 0.6 |
+| Block | 0.9 |
+| Ban | 1.0 |
+
+**Score formula:**
+
+```
+score = min(1.0,
+    fingerprint_anomaly * 0.30
+  + rate_pressure * 0.25
+  + behavioral_anomaly * 0.30
+  + (recent_violations ? 1.0 : 0.0) * 0.15
+)
+```
+
+**Action thresholds:**
+
+| Score Range | Action | HTTP Response |
+|-------------|--------|---------------|
+| 0.0 - 0.39 | **Allow** | Request forwarded to upstream |
+| 0.4 - 0.69 | **Warn** | Request forwarded, warning logged to audit chain |
+| 0.7 - 1.0 | **Block** | 403 Forbidden, event recorded in audit chain |
 
 ---
 
 ## Quick Start
 
-Add NexusShield to your `Cargo.toml`:
+### Run as a Reverse Proxy
 
-```toml
-[dependencies]
-nexus-shield = { path = "../NexusShield" }
+Protect a local service running on port 3000:
+
+```bash
+nexus-shield --port 8080 --upstream http://localhost:3000
 ```
 
-Create and use the shield:
+All traffic to port 8080 is inspected by the full NexusShield pipeline before being forwarded to port 3000.
+
+### Run in Standalone Mode
+
+Run NexusShield without an upstream target (for testing or as an inspection-only gateway):
+
+```bash
+nexus-shield --port 8080 --standalone
+```
+
+In standalone mode, all requests pass through the security pipeline and receive "NexusShield: request inspected and allowed" on the fallback handler.
+
+### Integrate as Axum Middleware
+
+Use NexusShield as a middleware layer in your own Axum application:
 
 ```rust
-use nexus_shield::{ShieldEngine, ShieldConfig, SecurityPreset, RequestContext, ShieldVerdict};
-use std::collections::HashMap;
+use std::sync::Arc;
+use axum::{Router, Extension, middleware};
+use nexus_shield::{Shield, ShieldConfig, shield_middleware};
 
-fn main() {
-    // Initialize with a preset
-    let config = ShieldConfig::from_preset(SecurityPreset::Moderate);
-    let shield = ShieldEngine::new(config);
+let config = ShieldConfig::default();
+let shield = Arc::new(Shield::new(config));
 
-    // Build a request context from your HTTP request
-    let ctx = RequestContext {
-        source_ip: "203.0.113.42".to_string(),
-        path: "/api/v1/query".to_string(),
-        method: "POST".to_string(),
-        user_agent: Some("Mozilla/5.0 Chrome/120".to_string()),
-        auth_user: Some("alice".to_string()),
-        body_size: 256,
-        headers: HashMap::new(),
-    };
+let app = Router::new()
+    .route("/api/query", post(query_handler))
+    .layer(middleware::from_fn(shield_middleware))
+    .layer(Extension(shield.clone()));
+```
 
-    // Step 1: Analyze the request (checks IP, fingerprint, reputation)
-    match shield.analyze_request(&ctx) {
-        ShieldVerdict::Allow => { /* proceed */ }
-        ShieldVerdict::Block { reason, .. } => {
-            eprintln!("Request blocked: {}", reason);
-            return;
-        }
-        ShieldVerdict::RateLimit { delay_ms } => {
-            std::thread::sleep(std::time::Duration::from_millis(delay_ms));
-        }
-    }
+### Validate SQL Directly
 
-    // Step 2: Analyze the SQL query
-    let sql = "SELECT * FROM users WHERE id = $1";
-    match shield.analyze_query(sql, &ctx) {
-        ShieldVerdict::Allow => {
-            println!("Query allowed, execute it.");
-        }
-        ShieldVerdict::Block { reason, .. } => {
-            eprintln!("Query blocked: {}", reason);
-        }
-        ShieldVerdict::RateLimit { delay_ms } => {
-            eprintln!("Rate limited for {}ms", delay_ms);
-        }
-    }
+```rust
+let shield = Shield::new(ShieldConfig::default());
 
-    // Check the shield status
-    let status = shield.get_status();
-    println!(
-        "Shield: enabled={}, preset={:?}, requests={}, threats={}",
-        status.enabled, status.preset,
-        status.total_requests_analyzed, status.total_threats_detected
-    );
-}
+// Safe query -- passes
+shield.validate_sql("SELECT * FROM sensors WHERE id = 1").unwrap();
+
+// Injection attempt -- blocked
+let err = shield.validate_sql("SELECT * FROM users UNION SELECT password FROM admin");
+assert!(err.is_err());
+```
+
+### Validate URLs for SSRF
+
+```rust
+// Public URL -- passes
+shield.validate_url("https://api.example.com/data").unwrap();
+
+// Cloud metadata -- blocked
+let err = shield.validate_url("http://169.254.169.254/latest/meta-data/");
+assert!(err.is_err());
 ```
 
 ---
 
-## Full API Reference
+## CLI Reference
 
-### `ShieldEngine`
+```
+nexus-shield [OPTIONS]
 
-The main facade that coordinates all detection modules.
-
-#### Constructor
-
-```rust
-pub fn new(config: ShieldConfig) -> Self
+Options:
+  -p, --port <PORT>                  Port to listen on [default: 8080]
+  -u, --upstream <URL>               Upstream target to proxy to (e.g., http://localhost:3000)
+  -c, --config <PATH>                Config file path [default: /etc/nexus-shield/config.toml]
+      --block-threshold <FLOAT>      Score threshold for blocking (0.0-1.0) [default: 0.7]
+      --warn-threshold <FLOAT>       Score threshold for warnings (0.0-1.0) [default: 0.4]
+      --rps <FLOAT>                  Requests per second per IP [default: 50]
+      --standalone                   Run without upstream (inspection-only mode) [default: false]
+  -h, --help                         Print help
 ```
 
-Creates a new shield engine with the given configuration. Initializes all detection modules, the threat feed, and the policy engine.
+**Examples:**
 
-#### Request Analysis
+```bash
+# Protect a Node.js app
+nexus-shield --port 8080 --upstream http://localhost:3000
 
-```rust
-pub fn analyze_request(&self, ctx: &RequestContext) -> ShieldVerdict
+# Strict mode
+nexus-shield --port 8080 --upstream http://localhost:3000 \
+    --block-threshold 0.5 --warn-threshold 0.2 --rps 20
+
+# Permissive mode for development
+nexus-shield --port 8080 --upstream http://localhost:3000 \
+    --block-threshold 0.9 --warn-threshold 0.6 --rps 200
+
+# Standalone inspection mode
+nexus-shield --port 8080 --standalone
 ```
-
-Analyzes an incoming HTTP request before it reaches any handler. Runs the following checks in order:
-
-1. Shield enabled check (returns `Allow` if disabled)
-2. Allowlist bypass
-3. Ban check (IP reputation)
-4. Auto-blocker check (active block entries)
-5. Request fingerprinting (user-agent classification + suspicion scoring)
-6. IP reputation scoring
-7. Policy evaluation (custom rules, then preset thresholds)
-
-Returns `ShieldVerdict::Allow`, `ShieldVerdict::Block`, or `ShieldVerdict::RateLimit`.
-
-```rust
-pub fn analyze_query(&self, query: &str, ctx: &RequestContext) -> ShieldVerdict
-```
-
-Analyzes a SQL query string for injection patterns and anomalous behavior. Runs:
-
-1. SQL injection pattern matching (38 patterns)
-2. Anomaly detection (rate deviation from baseline)
-3. Policy evaluation
-
-Returns the same `ShieldVerdict` enum.
-
-#### Authentication Tracking
-
-```rust
-pub fn record_failed_auth(&self, ip: &str, username: &str)
-```
-
-Records a failed authentication attempt from the given IP. Decreases reputation by 10 points per failure. After 10 failures from the same IP (when auto-blocking is enabled), the IP is automatically banned for `default_ban_duration_secs`.
-
-```rust
-pub fn record_success(&self, ctx: &RequestContext)
-```
-
-Records a successful request, slightly improving the IP's reputation score (+1).
-
-#### Dashboard / Monitoring Methods
-
-```rust
-pub fn get_stats(&self) -> ThreatStats
-```
-
-Returns aggregated statistics including: total events, events by threat level, events by type, blocked IPs count, active bans, top 10 offending IPs, and timestamp of last critical event.
-
-```rust
-pub fn get_recent_events(&self, limit: usize) -> Vec<ThreatEvent>
-```
-
-Returns the most recent threat events (newest first), up to `limit` entries.
-
-```rust
-pub fn get_blocked_ips(&self) -> Vec<BlockEntry>
-```
-
-Returns all currently active (non-expired) block entries.
-
-```rust
-pub fn get_ip_reputation(&self, ip: &str) -> Option<IpReputation>
-```
-
-Returns the full reputation record for a specific IP, or `None` if never seen.
-
-```rust
-pub fn get_status(&self) -> ShieldStatus
-```
-
-Returns a summary of the shield engine's current state: enabled flag, active preset, uptime in seconds, total requests analyzed, total threats detected, active bans count, and blocked IPs count.
-
-#### IP Management
-
-```rust
-pub fn unblock_ip(&self, ip: &str) -> bool
-```
-
-Removes an IP from both the auto-blocker and the ban list. Returns `true` if the IP was found in either.
-
-```rust
-pub fn add_to_allowlist(&self, ip: &str)
-```
-
-Adds an IP to the allowlist. Allowlisted IPs bypass all security checks.
-
-```rust
-pub fn remove_from_allowlist(&self, ip: &str)
-```
-
-Removes an IP from the allowlist.
-
-```rust
-pub fn get_allowlist(&self) -> Vec<String>
-```
-
-Returns all IPs currently on the allowlist.
-
-```rust
-pub fn manual_block(&self, ip: &str, reason: &str, duration_secs: u64)
-```
-
-Manually blocks an IP for the specified duration with a custom reason. The block is recorded at `ThreatLevel::High`.
-
-#### Policy Management
-
-```rust
-pub fn update_policy(&self, policy: SecurityPolicy)
-```
-
-Replaces the active security policy. Takes effect immediately for all subsequent requests.
-
-```rust
-pub fn get_policy(&self) -> SecurityPolicy
-```
-
-Returns a clone of the currently active security policy.
-
-#### Maintenance
-
-```rust
-pub fn cleanup_expired(&self)
-```
-
-Removes expired block entries and bans. Should be called periodically (e.g., on a timer matching `cleanup_interval_secs`).
 
 ---
 
-## REST API Endpoints
+## API Endpoints
 
-When integrated with the Aegis-DB server, NexusShield exposes the following REST endpoints:
+NexusShield exposes 4 status endpoints alongside the proxy. These are available in both proxy and standalone modes.
 
-| # | Method | Endpoint | Description |
-|---|--------|----------|-------------|
-| 1 | `GET` | `/api/v1/shield/status` | Get shield engine status |
-| 2 | `GET` | `/api/v1/shield/stats` | Get aggregated threat statistics |
-| 3 | `GET` | `/api/v1/shield/events` | Get recent threat events |
-| 4 | `GET` | `/api/v1/shield/events/:id` | Get a specific threat event by ID |
-| 5 | `GET` | `/api/v1/shield/blocked` | List all blocked IPs |
-| 6 | `POST` | `/api/v1/shield/block` | Manually block an IP |
-| 7 | `DELETE` | `/api/v1/shield/block/:ip` | Unblock an IP |
-| 8 | `GET` | `/api/v1/shield/allowlist` | List allowlisted IPs |
-| 9 | `POST` | `/api/v1/shield/allowlist` | Add IP to allowlist |
-| 10 | `DELETE` | `/api/v1/shield/allowlist/:ip` | Remove IP from allowlist |
-| 11 | `GET` | `/api/v1/shield/reputation/:ip` | Get IP reputation details |
-| 12 | `GET` | `/api/v1/shield/policy` | Get current security policy |
-| 13 | `PUT` | `/api/v1/shield/policy` | Update security policy |
+### `GET /health`
 
-### Endpoint Examples
-
-**Get shield status:**
+Health check endpoint.
 
 ```bash
-curl http://localhost:9090/api/v1/shield/status
+curl http://localhost:8080/health
+```
+
+```
+NexusShield OK
+```
+
+### `GET /status`
+
+Returns gateway configuration, active modules, and audit chain integrity.
+
+```bash
+curl http://localhost:8080/status
 ```
 
 ```json
 {
-  "enabled": true,
-  "preset": "Moderate",
-  "uptime_secs": 86400,
-  "total_requests_analyzed": 152847,
-  "total_threats_detected": 23,
-  "active_bans": 2,
-  "blocked_ips": 3
+  "service": "NexusShield",
+  "version": "0.1.0",
+  "status": "active",
+  "config": {
+    "block_threshold": 0.7,
+    "warn_threshold": 0.4,
+    "rate_rps": 50.0,
+    "rate_burst": 100.0
+  },
+  "audit_chain": {
+    "total_events": 1247,
+    "chain_valid": true
+  },
+  "modules": [
+    "sql_firewall",
+    "ssrf_guard",
+    "rate_governor",
+    "fingerprint",
+    "quarantine",
+    "email_guard",
+    "credential_vault",
+    "audit_chain",
+    "sanitizer",
+    "threat_score"
+  ]
 }
 ```
 
-**Get threat statistics:**
+### `GET /audit`
+
+Returns the 50 most recent security events (newest first) with chain integrity status.
 
 ```bash
-curl http://localhost:9090/api/v1/shield/stats
+curl http://localhost:8080/audit
 ```
 
 ```json
 {
-  "total_events": 47,
-  "events_by_level": { "critical": 2, "high": 8, "medium": 15, "low": 12, "info": 10 },
-  "events_by_type": { "SqlInjection": 18, "BruteForce": 12, "SuspiciousFingerprint": 9, "QueryAnomaly": 8 },
-  "blocked_ips_count": 3,
-  "active_bans": 2,
-  "top_offending_ips": [["203.0.113.42", 12], ["198.51.100.7", 8]],
-  "last_critical_event": 1711324800
+  "recent_events": [
+    {
+      "id": "550e8400-e29b-41d4-a716-446655440000",
+      "timestamp": "2026-03-24T10:30:00Z",
+      "event_type": "RequestBlocked",
+      "source_ip": "203.0.113.42",
+      "details": "score=0.823, fingerprint=0.700, rate=0.900, behavioral=0.600",
+      "threat_score": 0.823
+    }
+  ],
+  "total": 1247,
+  "chain_valid": true
 }
 ```
 
-**Get recent threat events:**
+### `GET /stats`
+
+Returns threat statistics for the last 5 minutes and last hour.
 
 ```bash
-curl "http://localhost:9090/api/v1/shield/events?limit=5"
-```
-
-**Manually block an IP:**
-
-```bash
-curl -X POST http://localhost:9090/api/v1/shield/block \
-  -H "Content-Type: application/json" \
-  -d '{"ip": "203.0.113.42", "reason": "manual block", "duration_secs": 7200}'
-```
-
-**Unblock an IP:**
-
-```bash
-curl -X DELETE http://localhost:9090/api/v1/shield/block/203.0.113.42
-```
-
-**Get IP reputation:**
-
-```bash
-curl http://localhost:9090/api/v1/shield/reputation/203.0.113.42
+curl http://localhost:8080/stats
 ```
 
 ```json
 {
-  "ip": "203.0.113.42",
-  "score": -47,
-  "total_requests": 312,
-  "failed_auths": 8,
-  "blocked_requests": 5,
-  "threat_events": 12,
-  "first_seen": 1711238400,
-  "last_seen": 1711324800,
-  "banned_until": 1711332000,
-  "ban_reason": "brute force detected"
+  "last_5min": {
+    "blocked": 3,
+    "rate_limited": 12,
+    "sql_injection": 1,
+    "ssrf": 0
+  },
+  "last_hour": {
+    "blocked": 18,
+    "rate_limited": 47,
+    "sql_injection": 5,
+    "ssrf": 2
+  },
+  "total_audit_events": 1247
 }
-```
-
-**Add to allowlist:**
-
-```bash
-curl -X POST http://localhost:9090/api/v1/shield/allowlist \
-  -H "Content-Type: application/json" \
-  -d '{"ip": "10.0.0.1"}'
-```
-
-**Get current policy:**
-
-```bash
-curl http://localhost:9090/api/v1/shield/policy
-```
-
-**Update policy:**
-
-```bash
-curl -X PUT http://localhost:9090/api/v1/shield/policy \
-  -H "Content-Type: application/json" \
-  -d '{
-    "preset": "Strict",
-    "sql_injection_enabled": true,
-    "anomaly_detection_enabled": true,
-    "ip_reputation_enabled": true,
-    "fingerprinting_enabled": true,
-    "auto_blocking_enabled": true,
-    "custom_rules": [{
-      "name": "admin_lockdown",
-      "path_pattern": "/api/v1/admin",
-      "max_score": 30,
-      "action": "Blocked"
-    }]
-  }'
 ```
 
 ---
 
 ## Configuration Reference
 
-### `ShieldConfig` Fields
+### `ShieldConfig` (Top-Level)
 
-| Field | Type | Default (Moderate) | Description |
-|-------|------|--------------------|-------------|
-| `enabled` | `bool` | `true` | Master switch for the shield |
-| `preset` | `SecurityPreset` | `Moderate` | Active preset (Strict / Moderate / Permissive) |
-| `sql_injection_enabled` | `bool` | `true` | Enable SQL injection pattern matching |
-| `anomaly_detection_enabled` | `bool` | `true` | Enable query anomaly detection |
-| `ip_reputation_enabled` | `bool` | `true` | Enable IP reputation tracking |
-| `fingerprinting_enabled` | `bool` | `true` | Enable request fingerprinting |
-| `auto_blocking_enabled` | `bool` | `true` | Enable automatic IP blocking |
-| `auto_block_threshold` | `u32` | `80` | Threat score at which to auto-block |
-| `default_ban_duration_secs` | `u64` | `3600` | Default ban duration in seconds |
-| `max_ban_duration_secs` | `u64` | `86400` | Maximum ban duration in seconds |
-| `escalation_multiplier` | `f64` | `2.0` | Ban duration multiplier for repeat offenders |
-| `max_events_in_memory` | `usize` | `10000` | Maximum threat events in the rolling buffer |
-| `anomaly_learning_period_secs` | `u64` | `3600` | Baseline learning period before anomaly detection activates |
-| `anomaly_deviation_threshold` | `f64` | `3.0` | Query rate deviation multiplier to trigger anomaly |
-| `cleanup_interval_secs` | `u64` | `300` | Interval for cleaning up expired bans/blocks |
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `block_threshold` | `f64` | `0.7` | Threat score at which requests are blocked |
+| `warn_threshold` | `f64` | `0.4` | Threat score at which warnings are logged |
+| `sql` | `SqlFirewallConfig` | (see below) | SQL firewall settings |
+| `ssrf` | `SsrfConfig` | (see below) | SSRF guard settings |
+| `rate` | `RateConfig` | (see below) | Rate limiting settings |
+| `quarantine` | `QuarantineConfig` | (see below) | Data quarantine settings |
+| `email` | `EmailGuardConfig` | (see below) | Email guard settings |
+| `audit_max_events` | `usize` | `100,000` | Maximum events in the audit chain before pruning |
 
-### `RequestContext` Fields
+### `SqlFirewallConfig`
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `source_ip` | `String` | Client IP address |
-| `path` | `String` | HTTP request path |
-| `method` | `String` | HTTP method (GET, POST, etc.) |
-| `user_agent` | `Option<String>` | User-Agent header value |
-| `auth_user` | `Option<String>` | Authenticated username, if any |
-| `body_size` | `usize` | Request body size in bytes |
-| `headers` | `HashMap<String, String>` | All request headers |
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `allow_comments` | `bool` | `false` | Allow SQL comments (`--` and `/* */`) |
+| `max_query_length` | `usize` | `10,000` | Maximum query length in bytes |
+| `max_subquery_depth` | `u32` | `3` | Maximum subquery nesting depth |
+| `blocked_functions` | `Vec<String>` | `[]` | Additional dangerous function names |
+| `blocked_schemas` | `Vec<String>` | `[]` | Additional system schema names |
+
+### `SsrfConfig`
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `block_private_ips` | `bool` | `true` | Block RFC 1918 private IP ranges |
+| `block_loopback` | `bool` | `true` | Block loopback addresses |
+| `block_link_local` | `bool` | `true` | Block link-local addresses (169.254.x.x) |
+| `block_metadata_endpoints` | `bool` | `true` | Block cloud metadata endpoints |
+| `allowed_schemes` | `Vec<String>` | `["http", "https"]` | Allowed URL schemes |
+| `allowlist` | `HashSet<String>` | `{}` | Hosts/IPs bypassing all checks |
+| `blocklist` | `HashSet<String>` | `{}` | Hosts/IPs always blocked |
+| `blocked_ports` | `Vec<u16>` | 22 ports | Dangerous port numbers |
+
+### `RateConfig`
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `requests_per_second` | `f64` | `50.0` | Token refill rate per IP |
+| `burst_capacity` | `f64` | `100.0` | Maximum tokens (burst allowance) |
+| `warn_after` | `u32` | `3` | Violations to trigger warn |
+| `throttle_after` | `u32` | `8` | Violations to trigger throttle |
+| `block_after` | `u32` | `15` | Violations to trigger block |
+| `ban_after` | `u32` | `30` | Violations to trigger ban |
+| `ban_duration_secs` | `u64` | `300` | Ban duration in seconds |
+| `violation_decay_secs` | `u64` | `60` | Seconds between violation decay |
+
+### `QuarantineConfig`
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `max_rows` | `usize` | `5,000,000` | Maximum CSV rows |
+| `max_size_bytes` | `usize` | `524,288,000` | Maximum data size (500 MB) |
+| `max_columns` | `usize` | `500` | Maximum CSV columns |
+| `check_formula_injection` | `bool` | `true` | Check for `=`, `@`, `+`, `-` prefixes |
+| `check_embedded_scripts` | `bool` | `true` | Check for `<script>`, `javascript:`, etc. |
+
+### `EmailGuardConfig`
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `max_per_recipient` | `u32` | `5` | Max emails per recipient per window |
+| `rate_window_secs` | `u64` | `300` | Rate limiting window (5 minutes) |
+| `max_recipients` | `u32` | `10` | Max recipients per email |
+| `max_subject_len` | `usize` | `200` | Max subject length |
+| `max_body_len` | `usize` | `10,000` | Max body length |
+| `max_name_len` | `usize` | `100` | Max name field length |
+| `blocked_domains` | `Vec<String>` | 17 domains | Blocked email domains |
 
 ---
 
-## Threat Event JSON Schema
+## Security Presets
 
-Every threat event recorded in the feed has the following structure:
+NexusShield uses two primary thresholds that control its response posture:
 
-```json
-{
-  "id": "550e8400-e29b-41d4-a716-446655440000",
-  "timestamp": 1711324800,
-  "threat_type": "SqlInjection",
-  "level": "High",
-  "score": 85,
-  "source_ip": "203.0.113.42",
-  "description": "SQL injection patterns: union_select, or_always_true",
-  "request_path": "/api/v1/query",
-  "user_agent": "curl/7.81.0",
-  "details": {},
-  "action_taken": "Blocked"
-}
+| Preset | `warn_threshold` | `block_threshold` | Use Case |
+|--------|-----------------|-------------------|----------|
+| **Strict** | 0.2 | 0.5 | Production-facing endpoints |
+| **Default** | 0.4 | 0.7 | Developer services, internal tools |
+| **Permissive** | 0.6 | 0.9 | Development / testing |
+
+Set thresholds via CLI flags:
+
+```bash
+# Strict
+nexus-shield --warn-threshold 0.2 --block-threshold 0.5 --upstream http://localhost:3000
+
+# Permissive
+nexus-shield --warn-threshold 0.6 --block-threshold 0.9 --upstream http://localhost:3000
 ```
-
-**`threat_type` values:** `SqlInjection`, `QueryAnomaly`, `BruteForce`, `RateLimitAbuse`, `SuspiciousFingerprint`, `ReputationBlock`, `UnauthorizedAccess`, `PortScan`
-
-**`level` values:** `Critical` (score >= 90), `High` (70-89), `Medium` (40-69), `Low` (20-39), `Info` (0-19)
-
-**`action_taken` values:** `Allowed`, `RateLimited`, `Blocked`, `Banned`
 
 ---
 
 ## Module Reference
 
-| Module | File | Description |
-|--------|------|-------------|
-| `lib` | `src/lib.rs` | ShieldEngine facade, RequestContext, ShieldVerdict, ShieldStatus |
-| `sql_injection` | `src/sql_injection.rs` | 38-pattern SQL injection detector |
-| `ip_reputation` | `src/ip_reputation.rs` | Per-IP reputation tracker with ban management |
-| `fingerprint` | `src/fingerprint.rs` | User-agent classification and scanner detection |
-| `anomaly` | `src/anomaly.rs` | Per-identifier query rate baseline and deviation detection |
-| `blocker` | `src/blocker.rs` | Auto-blocker with timed bans and allowlist |
-| `threat` | `src/threat.rs` | ThreatEvent, ThreatLevel, ThreatType, ThreatAction types |
-| `config` | `src/config.rs` | ShieldConfig, SecurityPreset with 3 presets |
-| `policy` | `src/policy.rs` | SecurityPolicy with custom rules and threshold evaluation |
-| `feed` | `src/feed.rs` | Rolling threat event feed with aggregated statistics |
-| `error` | `src/error.rs` | ShieldError types (Blocked, PolicyViolation, ConfigError) |
+| # | Module | File | Lines | Description |
+|---|--------|------|-------|-------------|
+| 1 | `lib` | `src/lib.rs` | 712 | Core `Shield` struct, Axum middleware, error types, convenience methods |
+| 2 | `sql_firewall` | `src/sql_firewall.rs` | 609 | AST-level SQL injection detection via `sqlparser` |
+| 3 | `ssrf_guard` | `src/ssrf_guard.rs` | 282 | SSRF prevention with IP/DNS/port/scheme validation |
+| 4 | `email_guard` | `src/email_guard.rs` | 635 | Email endpoint protection: CRLF, bombing, injection |
+| 5 | `fingerprint` | `src/fingerprint.rs` | 543 | HTTP request fingerprinting and behavioral analysis |
+| 6 | `rate_governor` | `src/rate_governor.rs` | 466 | Adaptive per-IP rate limiting with 5-level escalation |
+| 7 | `quarantine` | `src/quarantine.rs` | 249 | CSV/JSON data validation for malicious payloads |
+| 8 | `credential_vault` | `src/credential_vault.rs` | 424 | AES-256-GCM credential encryption with per-user keys |
+| 9 | `audit_chain` | `src/audit_chain.rs` | 323 | SHA-256 hash-chained tamper-evident event log |
+| 10 | `sanitizer` | `src/sanitizer.rs` | 293 | Connection string, path, and error message sanitization |
+| 11 | `threat_score` | `src/threat_score.rs` | 180 | Multi-signal weighted threat scoring engine |
+| 12 | `config` | `src/config.rs` | 174 | Configuration structs with defaults for all modules |
+| 13 | `main` | `src/bin/main.rs` | 298 | Binary entry point, CLI args, Axum server, reverse proxy |
+| | **Total** | | **5,188** | |
 
 ---
 
-## Performance Characteristics
+## Deployment Models
 
-- **Pattern matching**: All 38 SQL injection regexes are compiled once at initialization. Matching is O(n * p) where n = query length and p = number of patterns.
-- **Reputation lookups**: `parking_lot::RwLock<HashMap>` provides minimal contention. Read-heavy workloads benefit from the reader-writer lock.
-- **Threat feed**: Ring buffer (VecDeque) with configurable max size (default 10,000 events). O(1) insertion, O(1) eviction.
-- **Fingerprinting**: Pure string matching against known signatures. No allocations for classification; single allocation for the result.
-- **Memory footprint**: Dominated by the threat event buffer. At 10,000 events with average 500 bytes per event, approximately 5MB.
-- **No async**: All operations are synchronous. Locks are held for microseconds. Safe to call from async contexts without blocking the executor.
+### Developer Laptop
+
+Protect local services (Node.js, Python, Go dev servers) from attacks when exposed on a network:
+
+```bash
+# Protect a local API server
+nexus-shield --port 8080 --upstream http://localhost:3000
+```
+
+All requests to `localhost:8080` are inspected before reaching your dev server on port 3000.
+
+### CI/CD Pipeline
+
+Add NexusShield as a validation step to inspect payloads before they reach staging/production:
+
+```yaml
+# GitHub Actions example
+- name: Security scan
+  run: |
+    cargo install nexus-shield
+    nexus-shield --standalone --port 8080 &
+    # Run integration tests against the shielded endpoint
+    curl -X POST http://localhost:8080/api/query \
+      -d '{"sql": "SELECT * FROM users WHERE id = 1"}'
+```
+
+### Production Gateway
+
+Run NexusShield as a reverse proxy in front of your production services:
+
+```bash
+nexus-shield \
+    --port 443 \
+    --upstream http://internal-service:3000 \
+    --block-threshold 0.5 \
+    --warn-threshold 0.2 \
+    --rps 100
+```
+
+### PM2 Deployment
+
+```javascript
+module.exports = {
+  apps: [{
+    name: 'nexus-shield',
+    script: '/opt/NexusShield/target/release/nexus-shield',
+    args: '--port 8080 --upstream http://localhost:3000',
+    env: { RUST_LOG: 'info,nexus_shield=debug' },
+    autorestart: true,
+    max_restarts: 10,
+    restart_delay: 2000
+  }]
+};
+```
+
+---
+
+## Performance
+
+- **AST parsing:** SQL queries are parsed with `sqlparser`'s zero-copy parser. The `GenericDialect` is instantiated per-call (stateless, no allocation overhead).
+- **Lock-free where possible:** `parking_lot::RwLock` for concurrent read access to behavioral data and audit chain. Write locks are held for microseconds.
+- **Per-IP state pruning:** Background task runs every 60 seconds, removing state for IPs not seen in the last 600 seconds. Prevents unbounded memory growth.
+- **Atomic operations:** Token bucket refill uses floating-point elapsed-time calculation, avoiding atomic contention.
+- **Async throughout:** Built on Tokio with `axum` for the HTTP layer. The reverse proxy uses `hyper-util` for efficient HTTP/1.1 forwarding.
+- **Memory footprint:** Dominated by the audit chain buffer. At 100,000 events with ~200 bytes per event, approximately 20 MB. Rate governor and fingerprint state scale with unique IP count.
+- **Request overhead:** The full middleware pipeline (rate check + fingerprint + behavioral + threat score) completes in microseconds for clean traffic. SQL parsing adds low-millisecond overhead per query.
 
 ---
 
@@ -849,32 +996,69 @@ cd /opt/NexusShield
 cargo build --release
 ```
 
+The binary is produced at `target/release/nexus-shield`.
+
 ### Run Tests
 
 ```bash
 cargo test
 ```
 
-All 69 tests cover: SQL injection pattern matching (10 tests), IP reputation scoring and bans (7 tests), request fingerprinting (7 tests), anomaly detection baselines (4 tests), auto-blocker operations (6 tests), threat event types (4 tests), configuration presets (4 tests), security policy evaluation (4 tests), threat feed operations (5 tests), error types (4 tests), and full engine integration (14 tests).
+### Run with Logging
+
+```bash
+RUST_LOG=info,nexus_shield=debug cargo run -- --port 8080 --standalone
+```
+
+---
+
+## Error Responses
+
+NexusShield returns deliberately vague error messages to avoid leaking security internals to attackers:
+
+| Error | HTTP Status | Client Message |
+|-------|-------------|----------------|
+| SQL injection detected | 403 Forbidden | "Request blocked by security policy" |
+| SSRF blocked | 403 Forbidden | "Request blocked by security policy" |
+| Threat score exceeded | 403 Forbidden | "Request blocked by security policy" |
+| Path traversal blocked | 403 Forbidden | "Request blocked by security policy" |
+| Rate limit exceeded | 429 Too Many Requests | "Rate limit exceeded" |
+| Malicious input | 400 Bad Request | "Invalid input detected" |
+| Invalid connection string | 400 Bad Request | "Invalid connection configuration" |
+| Data quarantine failed | 400 Bad Request | "Data validation failed" |
+| Email validation failed | 400 Bad Request | "Email validation failed" |
+| Email rate limit exceeded | 429 Too Many Requests | "Email rate limit exceeded" |
+
+Detailed reasons are logged server-side and recorded in the audit chain, but never exposed to clients.
+
+---
+
+## Background Tasks
+
+NexusShield runs a background maintenance task every 60 seconds:
+
+1. **Rate governor pruning** -- Removes per-IP token buckets not accessed in 600 seconds
+2. **Fingerprint pruning** -- Removes behavioral tracking data for stale IPs
+3. **Email rate limiter pruning** -- Removes expired per-recipient send records
+
+---
+
+## Client IP Extraction
+
+NexusShield extracts the client IP from HTTP headers in the following priority:
+
+1. `X-Forwarded-For` -- First IP in the comma-separated list
+2. `X-Real-IP` -- Single IP value
+3. Falls back to `"unknown"` if neither header is present
+
+Both headers are trimmed of whitespace.
 
 ---
 
 ## License
 
-Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) for the full text.
+Licensed under the MIT License. See [LICENSE](LICENSE) for the full text.
 
 ```
-Copyright 2024-2026 NexusShield Contributors
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
+Copyright 2024-2026 AutomataNexus - Andrew Jewell Sr.
 ```
