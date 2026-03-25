@@ -1,11 +1,15 @@
 [package]
 name = "nexus-shield"
-version = "0.3.0"
+version = "0.3.2"
 edition = "2021"
 rust-version = "1.75"
 authors = ["Andrew Jewell Sr. - AutomataNexus"]
 license = "MIT"
 description = "Adaptive zero-trust security gateway with real-time endpoint protection — SQL firewall, SSRF guard, malware detection, process monitoring, network analysis, rootkit detection"
+repository = "https://github.com/AutomataNexus/NexusShield"
+homepage = "https://github.com/AutomataNexus/NexusShield"
+keywords = ["security", "firewall", "endpoint-protection", "malware-detection", "zero-trust"]
+categories = ["network-programming", "web-programming"]
 
 [dependencies]
 # SQL parsing for injection detection (AST-level analysis, not regex)

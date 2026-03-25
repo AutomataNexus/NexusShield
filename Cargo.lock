@@ -1019,7 +1019,7 @@ dependencies = [
 
 [[package]]
 name = "nexus-shield"
-version = "0.3.0"
+version = "0.3.2"
 dependencies = [
  "aes-gcm",
  "async-trait",
