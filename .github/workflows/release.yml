@@ -20,6 +20,7 @@ jobs:
     outputs:
       hash: ${{ steps.hash.outputs.hash }}
       artifact_name: ${{ steps.info.outputs.artifact_name }}
+      base64_subjects: ${{ steps.provenance_subject.outputs.base64_subjects }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -65,8 +66,8 @@ jobs:
         id: provenance_subject
         run: |
           ARTIFACT="${{ steps.info.outputs.artifact_name }}"
-          HASH=$(sha256sum "${ARTIFACT}" | base64 -w0)
-          echo "base64_subjects=${HASH}" >> "$GITHUB_OUTPUT"
+          SUBJECTS=$(sha256sum "${ARTIFACT}" | base64 -w0)
+          echo "base64_subjects=${SUBJECTS}" >> "$GITHUB_OUTPUT"
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
@@ -84,7 +85,7 @@ jobs:
       contents: write
     uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.1.0
     with:
-      base64-subjects: "${{ needs.build.outputs.hash }}  ${{ needs.build.outputs.artifact_name }}"
+      base64-subjects: "${{ needs.build.outputs.base64_subjects }}"
       upload-assets: true
       provenance-name: "nexus-shield.intoto.jsonl"
 
