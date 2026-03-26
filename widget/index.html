@@ -516,6 +516,20 @@
       <div class="threat-bars" id="threatBarsHour"></div>
     </div>
 
+    <!-- Endpoint Protection -->
+    <div class="card">
+      <div class="card-title">Endpoint Protection</div>
+      <div id="endpointStatus" class="module-grid"></div>
+    </div>
+
+    <!-- Endpoint Detections -->
+    <div class="card">
+      <div class="card-title">Recent Detections</div>
+      <div class="audit-list" id="detectionList" style="max-height:20vh">
+        <div class="empty-state">No detections</div>
+      </div>
+    </div>
+
     <!-- Audit Log -->
     <div class="card audit-card">
       <div class="card-title">Recent Audit Events</div>
@@ -673,6 +687,31 @@ async function refresh() {
     renderAudit(audit.recent_events || []);
 
     document.getElementById('lastUpdate').textContent = new Date().toLocaleTimeString();
+
+    // Endpoint protection (optional)
+    try {
+      const ep = await fetchJSON('/endpoint/status');
+      const epEl = document.getElementById('endpointStatus');
+      const monitors = (ep.active_monitors || []).map(m =>
+        `<div class="module-item"><div class="module-dot"></div>${m}</div>`
+      ).join('');
+      const scanners = (ep.scanners_active || []).map(s =>
+        `<div class="module-item"><div class="module-dot"></div>${s}</div>`
+      ).join('');
+      epEl.innerHTML = monitors + scanners +
+        `<div class="module-item" style="background:var(--cream-light)">Scanned: ${ep.total_files_scanned || 0}</div>` +
+        `<div class="module-item" style="background:${(ep.total_threats_detected||0)>0?'var(--error-bg)':'var(--cream-light)'}">Threats: ${ep.total_threats_detected || 0}</div>`;
+
+      const det = await fetchJSON('/endpoint/detections');
+      const detEl = document.getElementById('detectionList');
+      if (det.detections && det.detections.length > 0) {
+        detEl.innerHTML = det.detections.slice(0,10).map(d => {
+          const cls = d.severity === 'critical' ? 'block' : d.severity === 'high' ? 'warn' : 'info';
+          return `<div class="audit-item"><span class="audit-type ${cls}">${d.severity}</span><span class="audit-msg">${d.description}</span><span class="audit-time">${d.scanner}</span></div>`;
+        }).join('');
+      }
+    } catch(e) { /* endpoint protection not enabled */ }
+
   } catch (e) {
     setOnline(false);
   }

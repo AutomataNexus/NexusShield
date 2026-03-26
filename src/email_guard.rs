@@ -46,7 +46,7 @@ pub enum EmailViolation {
 }
 
 /// Configuration for the email guard.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct EmailGuardConfig {
     /// Maximum emails per recipient per window.
     pub max_per_recipient: u32,

@@ -102,11 +102,29 @@ async fn main() {
     "#
     );
 
-    // Build shield config
-    let mut config = ShieldConfig::default();
-    config.block_threshold = args.block_threshold;
-    config.warn_threshold = args.warn_threshold;
-    config.rate.requests_per_second = args.rps;
+    // Load config from file if it exists, otherwise use defaults
+    let mut config = {
+        let config_path = std::path::Path::new(&args.config);
+        if config_path.exists() {
+            match nexus_shield::config::load_config(config_path) {
+                Ok(c) => {
+                    tracing::info!(path = %args.config, "Configuration loaded from file");
+                    c
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "Failed to load config, using defaults");
+                    ShieldConfig::default()
+                }
+            }
+        } else {
+            ShieldConfig::default()
+        }
+    };
+
+    // CLI args override config file values
+    if args.block_threshold != 0.7 { config.block_threshold = args.block_threshold; }
+    if args.warn_threshold != 0.4 { config.warn_threshold = args.warn_threshold; }
+    if args.rps != 50.0 { config.rate.requests_per_second = args.rps; }
 
     let mut shield = Shield::new(config);
 
@@ -182,10 +200,12 @@ async fn main() {
         }
     });
 
-    // Background: journal event forwarding
+    // Background: journal + webhook event forwarding
     {
         let audit_fwd = shield.audit.clone();
         let journal_config = nexus_shield::journal::JournalConfig::default();
+        let webhook_configs = shield.config.webhook_urls.clone();
+        let ferrum_config = shield.config.ferrum_mail.clone();
 
         tokio::spawn(async move {
             let mut last_count = audit_fwd.len();
@@ -197,11 +217,27 @@ async fn main() {
                     let new_events = audit_fwd.recent(current_count - last_count);
                     for event in new_events.iter().rev() {
                         nexus_shield::journal::log_to_journal(event, &journal_config);
+                        if !webhook_configs.is_empty() {
+                            nexus_shield::webhook::fire_webhooks(event, &webhook_configs).await;
+                        }
+                        nexus_shield::ferrum_integration::maybe_send_alert(event, &ferrum_config).await;
                     }
                     last_count = current_count;
                 }
             }
         });
+    }
+
+    // Start signature auto-updater if configured
+    if let Some(ref sig_config) = shield.config.signature_update {
+        let sig_path = std::path::PathBuf::from(
+            std::env::var("HOME").unwrap_or("/tmp".to_string())
+        ).join(".nexus-shield/signatures.ndjson");
+        let (_sig_handle, _sig_shutdown) = nexus_shield::signature_updater::start_updater(
+            sig_config.clone(),
+            sig_path,
+        );
+        tracing::info!("Signature auto-updater enabled");
     }
 
     // Start endpoint protection monitors if enabled
@@ -222,6 +258,8 @@ async fn main() {
     let endpoint_for_routes = endpoint_engine.clone();
     let shield_events = shield.clone();
     let shield_report = shield.clone();
+    let shield_metrics = shield.clone();
+    let start_time = std::time::Instant::now();
 
     // Build endpoint routes if enabled
     let endpoint_routes = if let Some(engine) = endpoint_for_routes {
@@ -301,6 +339,15 @@ async fn main() {
                 }
             }));
 
+        router = router.route("/metrics", get(move || {
+                let s = shield_metrics.clone();
+                let uptime = start_time.elapsed().as_secs();
+                async move {
+                    let body = nexus_shield::metrics::render_metrics(&s.audit, uptime);
+                    (StatusCode::OK, [("content-type", "text/plain; version=0.0.4")], body)
+                }
+            }));
+
         if let Some(ep_routes) = endpoint_routes {
             router = router.merge(ep_routes);
         }
@@ -309,6 +356,8 @@ async fn main() {
             .fallback(|| async {
                 (StatusCode::OK, "NexusShield: request inspected and allowed")
             })
+            .layer(middleware::from_fn(nexus_shield::auth::auth_middleware))
+            .layer(Extension(nexus_shield::auth::AuthToken(shield.config.api_token.clone())))
             .layer(middleware::from_fn(shield_middleware))
             .layer(Extension(shield.clone()))
     } else {
@@ -342,6 +391,8 @@ async fn main() {
                     proxy_handler(req, &upstream, &client).await
                 }
             })
+            .layer(middleware::from_fn(nexus_shield::auth::auth_middleware))
+            .layer(Extension(nexus_shield::auth::AuthToken(shield.config.api_token.clone())))
             .layer(middleware::from_fn(shield_middleware))
             .layer(Extension(shield.clone()))
     };
@@ -349,15 +400,39 @@ async fn main() {
     let addr = format!("0.0.0.0:{}", args.port);
     tracing::info!(listen = %addr, "NexusShield gateway starting");
 
-    let listener = TcpListener::bind(&addr).await.expect("Failed to bind");
-    tracing::info!(
-        "NexusShield active — protecting on port {}",
-        args.port
-    );
+    // Check for TLS configuration
+    let tls_cert = shield.config.tls_cert.clone();
+    let tls_key = shield.config.tls_key.clone();
 
-    axum::serve(listener, app)
-        .await
-        .expect("Server failed");
+    if let (Some(cert_path), Some(key_path)) = (tls_cert, tls_key) {
+        // TLS mode
+        let tls_config = axum_server::tls_rustls::RustlsConfig::from_pem_file(&cert_path, &key_path)
+            .await
+            .expect("Failed to load TLS certificate/key");
+
+        tracing::info!(
+            cert = %cert_path,
+            key = %key_path,
+            "NexusShield active — HTTPS on port {}",
+            args.port
+        );
+
+        axum_server::bind_rustls(addr.parse().expect("Invalid address"), tls_config)
+            .serve(app.into_make_service())
+            .await
+            .expect("TLS server failed");
+    } else {
+        // Plain HTTP mode
+        let listener = TcpListener::bind(&addr).await.expect("Failed to bind");
+        tracing::info!(
+            "NexusShield active — HTTP on port {}",
+            args.port
+        );
+
+        axum::serve(listener, app)
+            .await
+            .expect("Server failed");
+    }
 }
 
 async fn proxy_handler(

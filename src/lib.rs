@@ -24,22 +24,27 @@
 //! - **Input Sanitizer** — Connection string and path traversal prevention
 //! - **Threat Scoring** — Multi-signal adaptive threat assessment (0.0–1.0)
 
+pub mod auth;
 pub mod audit_chain;
 pub mod compliance_report;
 pub mod config;
 pub mod credential_vault;
 pub mod endpoint;
+pub mod ferrum_integration;
 pub mod fingerprint;
 pub mod journal;
+pub mod metrics;
 pub mod quarantine;
 pub mod rate_governor;
 pub mod sanitizer;
 pub mod siem_export;
+pub mod signature_updater;
 pub mod sql_firewall;
 pub mod sse_events;
 pub mod ssrf_guard;
 pub mod email_guard;
 pub mod threat_score;
+pub mod webhook;
 
 use std::sync::Arc;
 

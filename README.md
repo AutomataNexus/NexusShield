@@ -11,10 +11,9 @@
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-BSL--1.1-blue.svg" alt="License: BSL-1.1" /></a>
   <img src="https://img.shields.io/badge/Rust-1.85%2B_(2024_edition)-orange.svg" alt="Rust 1.85+" />
-  <img src="https://img.shields.io/badge/version-0.4.0-green.svg" alt="v0.4.0" />
-  <img src="https://img.shields.io/badge/LOC-10,635-informational.svg" alt="10,635 LOC" />
-  <img src="https://img.shields.io/badge/modules-33-blueviolet.svg" alt="33 modules" />
-  <img src="https://img.shields.io/badge/tests-384-brightgreen.svg" alt="384 tests" />
+  <img src="https://img.shields.io/badge/version-0.4.2-green.svg" alt="v0.4.2" />
+  <img src="https://img.shields.io/badge/modules-39-blueviolet.svg" alt="39 modules" />
+  <img src="https://img.shields.io/badge/tests-407-brightgreen.svg" alt="407 tests" />
 </p>
 
 ---
@@ -206,6 +205,7 @@ cargo test
 | `GET` | `/stats` | Request statistics (5min / 1hr) |
 | `GET` | `/events` | SSE real-time event stream |
 | `GET` | `/report` | HTML compliance report |
+| `GET` | `/metrics` | Prometheus metrics |
 
 ### Endpoint Protection Endpoints (when `--endpoint` is enabled)
 
@@ -712,16 +712,139 @@ curl -s http://localhost:8080/report > compliance-report.html
 
 ---
 
+## API Authentication
+
+When `api_token` is set in config, all sensitive endpoints require Bearer token auth:
+
+```bash
+# Protected endpoints return 401 without token
+curl http://localhost:8080/status
+# 401 Unauthorized
+
+# Pass the token
+curl -H "Authorization: Bearer my-secret-token" http://localhost:8080/status
+# 200 OK
+
+# Public endpoints never require auth
+curl http://localhost:8080/health       # always 200
+curl http://localhost:8080/dashboard    # always 200
+```
+
+Configure in `config.toml`:
+```toml
+api_token = "your-secret-token-here"
+```
+
+---
+
+## TLS / HTTPS
+
+NexusShield supports TLS via rustls (no OpenSSL dependency):
+
+```toml
+tls_cert = "/etc/nexus-shield/cert.pem"
+tls_key = "/etc/nexus-shield/key.pem"
+```
+
+When both are set, the server starts in HTTPS mode. Generate a self-signed cert for development:
+```bash
+openssl req -x509 -newkey rsa:4096 -keyout key.pem -out cert.pem -days 365 -nodes -subj '/CN=nexus-shield'
+```
+
+---
+
+## Webhook Alerts
+
+Fire HTTP POST to Slack, Discord, or any URL on security detections:
+
+```toml
+[[webhook_urls]]
+url = "https://hooks.slack.com/services/T.../B.../xxx"
+min_severity = "high"
+webhook_type = "slack"
+
+[[webhook_urls]]
+url = "https://discord.com/api/webhooks/xxx/yyy"
+min_severity = "critical"
+webhook_type = "discord"
+
+[[webhook_urls]]
+url = "https://your-pagerduty-or-custom-endpoint.com/alert"
+webhook_type = "generic"
+```
+
+Slack messages include emoji severity indicators. Discord uses rich embeds with color coding. Generic sends structured JSON.
+
+---
+
+## Ferrum-Mail Integration
+
+Send formatted HTML security alert emails via the Ferrum-Mail platform:
+
+```toml
+[ferrum_mail]
+api_url = "http://localhost:3030"
+api_key = "fm-key-123"
+from_address = "shield@company.com"
+alert_recipients = ["admin@company.com", "security@company.com"]
+min_severity = "high"
+```
+
+Emails include color-coded severity headers, event details table, chain hash for verification, and AutomataNexus branding.
+
+---
+
+## Automatic Signature Updates
+
+Pull malware signatures from a remote NDJSON feed on a timer:
+
+```toml
+[signature_update]
+feed_url = "https://signatures.nexusshield.dev/v1/latest.ndjson"
+interval_secs = 3600
+auth_header = "Bearer your-feed-token"
+```
+
+Updates are validated (JSON per line) and written atomically (temp + rename). Invalid feeds are rejected without corrupting the local database.
+
+---
+
+## Prometheus Metrics
+
+Expose counters at `/metrics` in Prometheus text exposition format:
+
+```bash
+curl http://localhost:8080/metrics
+```
+
+Available metrics:
+- `nexus_shield_audit_events_total` — total audit chain events
+- `nexus_shield_requests_blocked_total` — blocked requests (last hour)
+- `nexus_shield_requests_blocked_5min` — blocked requests (last 5 min)
+- `nexus_shield_rate_limited_total` — rate limited (last hour)
+- `nexus_shield_sql_injection_total` — SQL injection attempts (last hour)
+- `nexus_shield_ssrf_total` — SSRF attempts (last hour)
+- `nexus_shield_malware_detected_total` — malware detections (last hour)
+- `nexus_shield_chain_valid` — audit chain integrity (1=valid, 0=tampered)
+- `nexus_shield_uptime_seconds` — uptime
+
+---
+
 ## Crate Structure
 
 ```
 nexus-shield/                        10,635 lines of Rust
   src/
     lib.rs                           Shield orchestrator + middleware
+    auth.rs                          API authentication middleware (Bearer token)
     siem_export.rs                   SIEM integration (Syslog, ES, Splunk, webhook)
     sse_events.rs                    Server-Sent Events real-time streaming
     journal.rs                       Systemd journal integration
     compliance_report.rs             HTML/JSON compliance report generator
+    webhook.rs                       Webhook alerts (Slack, Discord, generic)
+    ferrum_integration.rs            Ferrum-Mail email alert integration
+    signature_updater.rs             Automatic signature database updates
+    metrics.rs                       Prometheus /metrics endpoint
     config.rs                        ShieldConfig with defaults
     sql_firewall.rs                  AST-level SQL injection detection
     ssrf_guard.rs                    SSRF/IP/DNS validation

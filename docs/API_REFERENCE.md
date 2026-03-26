@@ -18,6 +18,9 @@ Base URL: `http://localhost:8080` (default port)
 | `GET` | `/status` | Gateway configuration, modules, audit chain integrity |
 | `GET` | `/audit` | Recent security events with chain verification |
 | `GET` | `/stats` | Threat statistics for last 5 minutes and last hour |
+| `GET` | `/events` | SSE real-time event stream |
+| `GET` | `/report` | HTML compliance report |
+| `GET` | `/metrics` | Prometheus text exposition metrics |
 
 ### Endpoint Protection Endpoints (requires `--endpoint`)
 
