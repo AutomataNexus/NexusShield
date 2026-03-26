@@ -7,7 +7,7 @@
 //! Metrics — exposes NexusShield counters in Prometheus text exposition format
 //! at the `/metrics` endpoint.
 //!
-//! ```
+//! ```text
 //! # HELP nexus_shield_requests_blocked_total Total requests blocked
 //! # TYPE nexus_shield_requests_blocked_total counter
 //! nexus_shield_requests_blocked_total 42
