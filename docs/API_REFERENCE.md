@@ -86,7 +86,7 @@ curl -s http://localhost:8080/status | jq .
 ```json
 {
   "service": "NexusShield",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "status": "active",
   "config": {
     "block_threshold": 0.7,

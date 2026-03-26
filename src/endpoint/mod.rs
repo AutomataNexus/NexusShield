@@ -301,15 +301,19 @@ pub struct EndpointEngine {
     pub quarantine: Arc<file_quarantine::QuarantineVault>,
     /// DNS filtering proxy.
     pub dns_filter: Option<Arc<dns_filter::DnsFilter>>,
+    /// Container image scanner (on-demand).
+    pub container_scanner: container_scanner::ContainerScanner,
+    /// Supply chain dependency scanner (on-demand).
+    pub supply_chain_scanner: supply_chain::SupplyChainScanner,
     /// Broadcast channel for real-time scan results.
     result_tx: tokio::sync::broadcast::Sender<ScanResult>,
     /// Detection history (ring buffer).
     history: Arc<RwLock<VecDeque<ScanResult>>>,
     /// Configuration.
     config: EndpointConfig,
-    /// Counters.
-    files_scanned: AtomicU64,
-    threats_detected: AtomicU64,
+    /// Counters (Arc-wrapped for safe sharing across spawned tasks).
+    files_scanned: Arc<AtomicU64>,
+    threats_detected: Arc<AtomicU64>,
     /// Whether the engine is running.
     running: AtomicBool,
 }
@@ -349,17 +353,27 @@ impl EndpointEngine {
         let yara = yara_engine::YaraEngine::new(None);
         scanners.push(Arc::new(yara));
 
+        // On-demand scanners
+        let container_scanner = container_scanner::ContainerScanner::new(
+            container_scanner::ContainerScanConfig::default(),
+        );
+        let supply_chain_scanner = supply_chain::SupplyChainScanner::new(
+            supply_chain::SupplyChainConfig::default(),
+        );
+
         Self {
             scanners,
             allowlist,
             threat_intel,
             quarantine,
             dns_filter,
+            container_scanner,
+            supply_chain_scanner,
             result_tx,
             history: Arc::new(RwLock::new(VecDeque::with_capacity(10000))),
             config,
-            files_scanned: AtomicU64::new(0),
-            threats_detected: AtomicU64::new(0),
+            files_scanned: Arc::new(AtomicU64::new(0)),
+            threats_detected: Arc::new(AtomicU64::new(0)),
             running: AtomicBool::new(false),
         }
     }
@@ -394,8 +408,8 @@ impl EndpointEngine {
             let history = Arc::clone(&self.history);
             let quarantine = Arc::clone(&self.quarantine);
             let audit2 = Arc::clone(&audit);
-            let files_scanned = &self.files_scanned as *const AtomicU64 as usize;
-            let threats_detected = &self.threats_detected as *const AtomicU64 as usize;
+            let files_scanned = Arc::clone(&self.files_scanned);
+            let threats_detected = Arc::clone(&self.threats_detected);
 
             let handle = tokio::spawn(async move {
                 while let Some(path) = scan_rx.recv().await {
@@ -408,16 +422,11 @@ impl EndpointEngine {
                         }
                     }
 
-                    // SAFETY: These are effectively &'static since EndpointEngine outlives tasks
-                    unsafe {
-                        (*(files_scanned as *const AtomicU64)).fetch_add(1, Ordering::Relaxed);
-                    }
+                    files_scanned.fetch_add(1, Ordering::Relaxed);
 
                     // Process results
                     for result in all_results {
-                        unsafe {
-                            (*(threats_detected as *const AtomicU64)).fetch_add(1, Ordering::Relaxed);
-                        }
+                        threats_detected.fetch_add(1, Ordering::Relaxed);
 
                         // Quarantine if needed
                         if let RecommendedAction::Quarantine { ref source_path } = result.action {
@@ -461,12 +470,10 @@ impl EndpointEngine {
                 let history = Arc::clone(&self.history);
                 let audit3 = Arc::clone(&audit);
                 let result_tx = self.result_tx.clone();
-                let threats_detected = &self.threats_detected as *const AtomicU64 as usize;
+                let threats_detected = Arc::clone(&self.threats_detected);
                 let dns_consumer = tokio::spawn(async move {
                     while let Some(result) = dns_rx.recv().await {
-                        unsafe {
-                            (*(threats_detected as *const AtomicU64)).fetch_add(1, Ordering::Relaxed);
-                        }
+                        threats_detected.fetch_add(1, Ordering::Relaxed);
                         audit3.record(
                             SecurityEventType::MalwareDetected,
                             &result.target,
@@ -496,12 +503,10 @@ impl EndpointEngine {
             let history = Arc::clone(&self.history);
             let audit4 = Arc::clone(&audit);
             let result_tx = self.result_tx.clone();
-            let threats_detected = &self.threats_detected as *const AtomicU64 as usize;
+            let threats_detected = Arc::clone(&self.threats_detected);
             let usb_consumer = tokio::spawn(async move {
                 while let Some(result) = usb_rx.recv().await {
-                    unsafe {
-                        (*(threats_detected as *const AtomicU64)).fetch_add(1, Ordering::Relaxed);
-                    }
+                    threats_detected.fetch_add(1, Ordering::Relaxed);
                     audit4.record(
                         SecurityEventType::MalwareDetected,
                         &result.target,
@@ -519,6 +524,105 @@ impl EndpointEngine {
             handles.push(usb_consumer);
         }
 
+        // Start process monitor
+        if self.config.enable_process_monitor {
+            let (pm_tx, mut pm_rx) = tokio::sync::mpsc::unbounded_channel::<ScanResult>();
+            let proc_mon = Arc::new(process_monitor::ProcessMonitor::new(self.config.process_monitor.clone()));
+            let pm_handle = Arc::clone(&proc_mon).start(pm_tx);
+            handles.push(pm_handle);
+
+            let history = Arc::clone(&self.history);
+            let audit_pm = Arc::clone(&audit);
+            let result_tx = self.result_tx.clone();
+            let threats_detected = Arc::clone(&self.threats_detected);
+            let pm_consumer = tokio::spawn(async move {
+                while let Some(result) = pm_rx.recv().await {
+                    threats_detected.fetch_add(1, Ordering::Relaxed);
+                    audit_pm.record(SecurityEventType::SuspiciousProcess, &result.target, &result.description, result.confidence);
+                    let _ = result_tx.send(result.clone());
+                    let mut hist = history.write();
+                    if hist.len() >= 10000 { hist.pop_front(); }
+                    hist.push_back(result);
+                }
+            });
+            handles.push(pm_consumer);
+        }
+
+        // Start network monitor
+        if self.config.enable_network_monitor {
+            let (nm_tx, mut nm_rx) = tokio::sync::mpsc::unbounded_channel::<ScanResult>();
+            let net_mon = Arc::new(network_monitor::NetworkMonitor::new(
+                self.config.network_monitor.clone(),
+                Arc::clone(&self.threat_intel),
+            ));
+            let nm_handle = Arc::clone(&net_mon).start(nm_tx);
+            handles.push(nm_handle);
+
+            let history = Arc::clone(&self.history);
+            let audit_nm = Arc::clone(&audit);
+            let result_tx = self.result_tx.clone();
+            let threats_detected = Arc::clone(&self.threats_detected);
+            let nm_consumer = tokio::spawn(async move {
+                while let Some(result) = nm_rx.recv().await {
+                    threats_detected.fetch_add(1, Ordering::Relaxed);
+                    audit_nm.record(SecurityEventType::SuspiciousNetwork, &result.target, &result.description, result.confidence);
+                    let _ = result_tx.send(result.clone());
+                    let mut hist = history.write();
+                    if hist.len() >= 10000 { hist.pop_front(); }
+                    hist.push_back(result);
+                }
+            });
+            handles.push(nm_consumer);
+        }
+
+        // Start memory scanner
+        if self.config.enable_memory_scanner {
+            let (ms_tx, mut ms_rx) = tokio::sync::mpsc::unbounded_channel::<ScanResult>();
+            let mem_scan = Arc::new(memory_scanner::MemoryScanner::new(self.config.memory_scanner.clone()));
+            let ms_handle = Arc::clone(&mem_scan).start(ms_tx);
+            handles.push(ms_handle);
+
+            let history = Arc::clone(&self.history);
+            let audit_ms = Arc::clone(&audit);
+            let result_tx = self.result_tx.clone();
+            let threats_detected = Arc::clone(&self.threats_detected);
+            let ms_consumer = tokio::spawn(async move {
+                while let Some(result) = ms_rx.recv().await {
+                    threats_detected.fetch_add(1, Ordering::Relaxed);
+                    audit_ms.record(SecurityEventType::MemoryAnomaly, &result.target, &result.description, result.confidence);
+                    let _ = result_tx.send(result.clone());
+                    let mut hist = history.write();
+                    if hist.len() >= 10000 { hist.pop_front(); }
+                    hist.push_back(result);
+                }
+            });
+            handles.push(ms_consumer);
+        }
+
+        // Start rootkit detector
+        if self.config.enable_rootkit_detector {
+            let (rk_tx, mut rk_rx) = tokio::sync::mpsc::unbounded_channel::<ScanResult>();
+            let rk_det = Arc::new(rootkit_detector::RootkitDetector::new(self.config.rootkit_detector.clone()));
+            let rk_handle = Arc::clone(&rk_det).start(rk_tx);
+            handles.push(rk_handle);
+
+            let history = Arc::clone(&self.history);
+            let audit_rk = Arc::clone(&audit);
+            let result_tx = self.result_tx.clone();
+            let threats_detected = Arc::clone(&self.threats_detected);
+            let rk_consumer = tokio::spawn(async move {
+                while let Some(result) = rk_rx.recv().await {
+                    threats_detected.fetch_add(1, Ordering::Relaxed);
+                    audit_rk.record(SecurityEventType::RootkitIndicator, &result.target, &result.description, result.confidence);
+                    let _ = result_tx.send(result.clone());
+                    let mut hist = history.write();
+                    if hist.len() >= 10000 { hist.pop_front(); }
+                    hist.push_back(result);
+                }
+            });
+            handles.push(rk_consumer);
+        }
+
         // Start File Integrity Monitor
         if self.config.enable_fim {
             let (fim_tx, mut fim_rx) = tokio::sync::mpsc::unbounded_channel::<ScanResult>();
@@ -530,12 +634,10 @@ impl EndpointEngine {
             let history = Arc::clone(&self.history);
             let audit5 = Arc::clone(&audit);
             let result_tx = self.result_tx.clone();
-            let threats_detected = &self.threats_detected as *const AtomicU64 as usize;
+            let threats_detected = Arc::clone(&self.threats_detected);
             let fim_consumer = tokio::spawn(async move {
                 while let Some(result) = fim_rx.recv().await {
-                    unsafe {
-                        (*(threats_detected as *const AtomicU64)).fetch_add(1, Ordering::Relaxed);
-                    }
+                    threats_detected.fetch_add(1, Ordering::Relaxed);
                     audit5.record(
                         SecurityEventType::MalwareDetected,
                         &result.target,
@@ -564,6 +666,12 @@ impl EndpointEngine {
 
         self.files_scanned.fetch_add(1, Ordering::Relaxed);
         let mut results = Vec::new();
+
+        // Check if it's a dependency lock file (supply chain scan)
+        if supply_chain::SupplyChainScanner::detect_ecosystem(path).is_some() {
+            let mut sc_results = self.supply_chain_scanner.scan_file(path);
+            results.append(&mut sc_results);
+        }
 
         for scanner in &self.scanners {
             if scanner.is_active() {
@@ -605,6 +713,16 @@ impl EndpointEngine {
             }
         }
         results
+    }
+
+    /// Scan a Docker image for security issues.
+    pub fn scan_container_image(&self, image: &str) -> Vec<ScanResult> {
+        self.container_scanner.scan_image(image)
+    }
+
+    /// Scan a dependency lock file for supply chain risks.
+    pub fn scan_dependencies(&self, path: &Path) -> Vec<ScanResult> {
+        self.supply_chain_scanner.scan_file(path)
     }
 
     /// Subscribe to real-time scan results.

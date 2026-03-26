@@ -94,7 +94,7 @@ async fn main() {
     tracing::info!(
         r#"
     ╔══════════════════════════════════════════════╗
-    ║            NexusShield v0.3.0                ║
+    ║            NexusShield v0.4.0                ║
     ║     Adaptive Zero-Trust Security Gateway     ║
     ║      + Real-Time Endpoint Protection         ║
     ║          AutomataNexus Engineering            ║
@@ -182,6 +182,28 @@ async fn main() {
         }
     });
 
+    // Background: journal event forwarding
+    {
+        let audit_fwd = shield.audit.clone();
+        let journal_config = nexus_shield::journal::JournalConfig::default();
+
+        tokio::spawn(async move {
+            let mut last_count = audit_fwd.len();
+            let mut interval = tokio::time::interval(Duration::from_millis(500));
+            loop {
+                interval.tick().await;
+                let current_count = audit_fwd.len();
+                if current_count > last_count {
+                    let new_events = audit_fwd.recent(current_count - last_count);
+                    for event in new_events.iter().rev() {
+                        nexus_shield::journal::log_to_journal(event, &journal_config);
+                    }
+                    last_count = current_count;
+                }
+            }
+        });
+    }
+
     // Start endpoint protection monitors if enabled
     if let Some(ref engine) = endpoint_engine {
         if args.endpoint {
@@ -260,7 +282,12 @@ async fn main() {
                         "sql_firewall".into(), "ssrf_guard".into(), "rate_governor".into(),
                         "fingerprint".into(), "quarantine".into(), "email_guard".into(),
                         "credential_vault".into(), "audit_chain".into(), "sanitizer".into(),
-                        "threat_score".into(),
+                        "threat_score".into(), "siem_export".into(), "journal".into(),
+                        "sse_events".into(), "compliance_report".into(),
+                        "signatures".into(), "heuristics".into(), "yara_engine".into(),
+                        "watcher".into(), "process_monitor".into(), "network_monitor".into(),
+                        "dns_filter".into(), "usb_monitor".into(), "fim".into(),
+                        "container_scanner".into(), "supply_chain".into(),
                     ];
                     let shield_cfg = serde_json::json!({
                         "block_threshold": s.config.block_threshold,
@@ -386,7 +413,7 @@ async fn status_handler(shield: Arc<Shield>) -> impl IntoResponse {
 
     let status = serde_json::json!({
         "service": "NexusShield",
-        "version": "0.3.0",
+        "version": "0.4.0",
         "status": "active",
         "config": {
             "block_threshold": shield.config.block_threshold,
@@ -398,18 +425,42 @@ async fn status_handler(shield: Arc<Shield>) -> impl IntoResponse {
             "total_events": audit_count,
             "chain_valid": chain_verification.valid,
         },
-        "modules": [
-            "sql_firewall",
-            "ssrf_guard",
-            "rate_governor",
-            "fingerprint",
-            "quarantine",
-            "email_guard",
-            "credential_vault",
-            "audit_chain",
-            "sanitizer",
-            "threat_score",
-        ]
+        "modules": {
+            "gateway": [
+                "sql_firewall",
+                "ssrf_guard",
+                "rate_governor",
+                "fingerprint",
+                "quarantine",
+                "email_guard",
+                "credential_vault",
+                "audit_chain",
+                "sanitizer",
+                "threat_score",
+                "siem_export",
+                "journal",
+                "sse_events",
+                "compliance_report",
+            ],
+            "endpoint": [
+                "signatures",
+                "heuristics",
+                "yara_engine",
+                "watcher",
+                "process_monitor",
+                "network_monitor",
+                "memory_scanner",
+                "rootkit_detector",
+                "dns_filter",
+                "usb_monitor",
+                "fim",
+                "container_scanner",
+                "supply_chain",
+                "allowlist",
+                "threat_intel",
+                "file_quarantine",
+            ]
+        }
     });
 
     (StatusCode::OK, axum::Json(status))
