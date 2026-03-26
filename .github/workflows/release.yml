@@ -21,7 +21,6 @@ jobs:
       hash: ${{ steps.hash.outputs.hash }}
       artifact_name: ${{ steps.info.outputs.artifact_name }}
       base64_subjects: ${{ steps.provenance_subject.outputs.base64_subjects }}
-      base64_subjects: ${{ steps.provenance_subject.outputs.base64_subjects }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
