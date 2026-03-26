@@ -94,7 +94,7 @@ async fn main() {
     tracing::info!(
         r#"
     ╔══════════════════════════════════════════════╗
-    ║            NexusShield v0.4.0                ║
+    ║            NexusShield v0.4.2                ║
     ║     Adaptive Zero-Trust Security Gateway     ║
     ║      + Real-Time Endpoint Protection         ║
     ║          AutomataNexus Engineering            ║
@@ -488,7 +488,7 @@ async fn status_handler(shield: Arc<Shield>) -> impl IntoResponse {
 
     let status = serde_json::json!({
         "service": "NexusShield",
-        "version": "0.4.0",
+        "version": "0.4.2",
         "status": "active",
         "config": {
             "block_threshold": shield.config.block_threshold,
