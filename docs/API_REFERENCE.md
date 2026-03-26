@@ -1,6 +1,6 @@
 # NexusShield API Reference
 
-Complete reference for the 4 HTTP endpoints exposed by the NexusShield security gateway. These endpoints are available in both reverse proxy mode and standalone mode.
+Complete reference for all HTTP endpoints exposed by the NexusShield security gateway. Gateway endpoints are always available. Endpoint protection endpoints require the `--endpoint` flag.
 
 Base URL: `http://localhost:8080` (default port)
 
@@ -8,71 +8,85 @@ Base URL: `http://localhost:8080` (default port)
 
 ## Endpoint Summary
 
+### Gateway Endpoints (always available)
+
 | Method | Path | Description |
 |--------|------|-------------|
 | `GET` | `/health` | Health check |
+| `GET` | `/dashboard` | Live HTML monitoring dashboard |
+| `GET` | `/logo.png` | NexusShield logo (PNG) |
 | `GET` | `/status` | Gateway configuration, modules, audit chain integrity |
 | `GET` | `/audit` | Recent security events with chain verification |
 | `GET` | `/stats` | Threat statistics for last 5 minutes and last hour |
 
-All other paths are either proxied to the upstream (in proxy mode) or return "NexusShield: request inspected and allowed" (in standalone mode). All paths pass through the full security middleware pipeline before being handled.
+### Endpoint Protection Endpoints (requires `--endpoint`)
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/endpoint/status` | Endpoint engine stats (scanners, monitors, threats) |
+| `GET` | `/endpoint/detections` | Recent detections (last 100) |
+| `GET` | `/endpoint/quarantine` | Quarantined files list |
+| `POST` | `/endpoint/scan` | On-demand file or directory scan |
+
+All paths pass through the security middleware pipeline before being handled.
 
 ---
 
 ## 1. Health Check
 
-Returns a plain-text health status. Use this for load balancer health probes and uptime monitoring.
+Returns a plain-text health status. Use for load balancer health probes.
 
 **Endpoint:** `GET /health`
-
-**Authentication:** None required
-
-### Request
 
 ```bash
 curl http://localhost:8080/health
 ```
 
-### Response
-
-**Status:** `200 OK`
-**Content-Type:** `text/plain`
-
-```
-NexusShield OK
-```
-
-### Notes
-
-- This endpoint always returns `200 OK` as long as the NexusShield process is running.
-- The response is a fixed string; no JSON parsing is needed.
-- This endpoint passes through the security middleware, so requests from banned IPs will receive `429 Too Many Requests` instead.
+**Response:** `200 OK` — `NexusShield OK`
 
 ---
 
-## 2. Gateway Status
+## 2. Dashboard
 
-Returns the full gateway configuration, list of active security modules, and audit chain integrity status.
+Serves the live HTML monitoring dashboard with auto-refreshing stats, modules, threat breakdown, and audit log.
+
+**Endpoint:** `GET /dashboard`
+
+```bash
+# Open in browser
+open http://localhost:8080/dashboard
+```
+
+**Response:** `200 OK` — `text/html`
+
+---
+
+## 3. Logo
+
+Serves the NexusShield logo. Used by the dashboard.
+
+**Endpoint:** `GET /logo.png`
+
+**Response:** `200 OK` — `image/png` (cached for 24 hours)
+
+---
+
+## 4. Gateway Status
+
+Returns gateway configuration, active security modules, and audit chain integrity.
 
 **Endpoint:** `GET /status`
-
-**Authentication:** None required (status is not sensitive)
-
-### Request
 
 ```bash
 curl -s http://localhost:8080/status | jq .
 ```
 
-### Response
-
-**Status:** `200 OK`
-**Content-Type:** `application/json`
+**Response:**
 
 ```json
 {
   "service": "NexusShield",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "status": "active",
   "config": {
     "block_threshold": 0.7,
@@ -99,84 +113,32 @@ curl -s http://localhost:8080/status | jq .
 }
 ```
 
-### Response Schema
-
 | Field | Type | Description |
 |-------|------|-------------|
 | `service` | `string` | Always `"NexusShield"` |
 | `version` | `string` | NexusShield version |
-| `status` | `string` | Always `"active"` when the gateway is running |
-| `config` | `object` | Active configuration parameters (see below) |
-| `audit_chain` | `object` | Audit chain status (see below) |
-| `modules` | `array<string>` | List of active security modules |
-
-**`config` fields:**
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `block_threshold` | `f64` | Threat score at which requests are blocked (0.0-1.0) |
-| `warn_threshold` | `f64` | Threat score at which warnings are logged (0.0-1.0) |
-| `rate_rps` | `f64` | Configured requests per second per IP |
-| `rate_burst` | `f64` | Token bucket burst capacity |
-
-**`audit_chain` fields:**
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `total_events` | `usize` | Total events currently stored in the chain |
-| `chain_valid` | `bool` | Whether the full SHA-256 hash chain verifies without tampering |
-
-### Examples
-
-**Check if chain integrity is intact:**
-
-```bash
-curl -s http://localhost:8080/status | jq '.audit_chain.chain_valid'
-# true
-```
-
-**Get current thresholds:**
-
-```bash
-curl -s http://localhost:8080/status | jq '.config'
-# {
-#   "block_threshold": 0.7,
-#   "warn_threshold": 0.4,
-#   "rate_rps": 50.0,
-#   "rate_burst": 100.0
-# }
-```
-
-**List active modules:**
-
-```bash
-curl -s http://localhost:8080/status | jq '.modules[]'
-# "sql_firewall"
-# "ssrf_guard"
-# "rate_governor"
-# ...
-```
+| `status` | `string` | Always `"active"` when running |
+| `config.block_threshold` | `f64` | Threat score at which requests are blocked (0.0-1.0) |
+| `config.warn_threshold` | `f64` | Threat score at which warnings are logged |
+| `config.rate_rps` | `f64` | Requests per second per IP |
+| `config.rate_burst` | `f64` | Token bucket burst capacity |
+| `audit_chain.total_events` | `usize` | Total events in the chain |
+| `audit_chain.chain_valid` | `bool` | Whether SHA-256 hash chain verifies |
+| `modules` | `array<string>` | Active security modules |
 
 ---
 
-## 3. Audit Events
+## 5. Audit Events
 
-Returns the 50 most recent security events from the hash-chained audit log (newest first), along with the total event count and chain integrity status.
+Returns the 50 most recent security events from the hash-chained audit log.
 
 **Endpoint:** `GET /audit`
-
-**Authentication:** None required
-
-### Request
 
 ```bash
 curl -s http://localhost:8080/audit | jq .
 ```
 
-### Response
-
-**Status:** `200 OK`
-**Content-Type:** `application/json`
+**Response:**
 
 ```json
 {
@@ -188,30 +150,6 @@ curl -s http://localhost:8080/audit | jq .
       "source_ip": "203.0.113.42",
       "details": "score=0.823, fingerprint=0.700, rate=0.900, behavioral=0.600",
       "threat_score": 0.823
-    },
-    {
-      "id": "6ba7b810-9dad-11d1-80b4-00c04fd430c8",
-      "timestamp": "2026-03-24T10:29:55.456789Z",
-      "event_type": "RateLimitHit",
-      "source_ip": "198.51.100.7",
-      "details": "escalation=Block, violations=16",
-      "threat_score": 0.8
-    },
-    {
-      "id": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
-      "timestamp": "2026-03-24T10:29:50.789012Z",
-      "event_type": "SqlInjectionAttempt",
-      "source_ip": "192.0.2.15",
-      "details": "UnionInjection, DangerousFunction(\"sleep\")",
-      "threat_score": 0.95
-    },
-    {
-      "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
-      "timestamp": "2026-03-24T10:28:00.000000Z",
-      "event_type": "RequestAllowed",
-      "source_ip": "203.0.113.10",
-      "details": "WARN: score=0.450",
-      "threat_score": 0.45
     }
   ],
   "total": 1247,
@@ -219,92 +157,45 @@ curl -s http://localhost:8080/audit | jq .
 }
 ```
 
-### Response Schema
-
 | Field | Type | Description |
 |-------|------|-------------|
-| `recent_events` | `array<object>` | Up to 50 most recent events, newest first |
-| `total` | `usize` | Total events in the audit chain |
-| `chain_valid` | `bool` | Whether the full hash chain verifies |
+| `id` | `string` | UUID v4 identifier |
+| `timestamp` | `string` | RFC 3339 UTC timestamp |
+| `event_type` | `string` | Event type (see below) |
+| `source_ip` | `string` | Client IP address |
+| `details` | `string` | Internal diagnostic info |
+| `threat_score` | `f64` | Threat score (0.0-1.0) |
 
-**Event object fields:**
+**Event types:** `RequestAllowed`, `RequestBlocked`, `RateLimitHit`, `SqlInjectionAttempt`, `SsrfAttempt`, `PathTraversalAttempt`, `MaliciousPayload`, `DataQuarantined`, `AuthFailure`, `BanIssued`, `BanLifted`, `ChainVerified`, `MalwareDetected`, `SuspiciousProcess`, `SuspiciousNetwork`, `MemoryAnomaly`, `RootkitIndicator`, `FileQuarantined`, `FileRestored`, `SignatureDbUpdated`, `EndpointScanStarted`, `EndpointScanCompleted`
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `id` | `string` | UUID v4 unique identifier |
-| `timestamp` | `string` | RFC 3339 timestamp (e.g., `"2026-03-24T10:30:00.123456Z"`) |
-| `event_type` | `string` | Security event type (see below) |
-| `source_ip` | `string` | Client IP address that triggered the event |
-| `details` | `string` | Human-readable description (internal diagnostic info) |
-| `threat_score` | `f64` | Threat score at the time of the event (0.0-1.0) |
-
-**Possible `event_type` values:**
-
-| Event Type | Description |
-|------------|-------------|
-| `RequestAllowed` | Request passed all checks (logged when threat score triggers a warning) |
-| `RequestBlocked` | Request blocked due to high threat score |
-| `RateLimitHit` | Request denied by the rate governor |
-| `SqlInjectionAttempt` | SQL firewall detected an injection attempt |
-| `SsrfAttempt` | SSRF guard blocked a URL or IP |
-| `PathTraversalAttempt` | Path traversal detected in file path validation |
-| `MaliciousPayload` | Malicious content detected (email injection, etc.) |
-| `DataQuarantined` | Imported data failed quarantine validation |
-| `AuthFailure` | Authentication failure recorded |
-| `BanIssued` | IP ban applied |
-| `BanLifted` | IP ban removed |
-| `ChainVerified` | Chain integrity verification was performed |
-
-### Examples
-
-**Get the 5 most recent blocked requests:**
+**Examples:**
 
 ```bash
+# Get blocked requests only
 curl -s http://localhost:8080/audit | \
-  jq '[.recent_events[] | select(.event_type == "RequestBlocked")] | .[0:5]'
-```
+  jq '[.recent_events[] | select(.event_type == "RequestBlocked")]'
 
-**Check if the audit chain has been tampered with:**
-
-```bash
-curl -s http://localhost:8080/audit | jq '.chain_valid'
-# true
-```
-
-**Get all SQL injection attempts:**
-
-```bash
-curl -s http://localhost:8080/audit | \
-  jq '[.recent_events[] | select(.event_type == "SqlInjectionAttempt")]'
-```
-
-**Get events from a specific IP:**
-
-```bash
+# Get events from a specific IP
 curl -s http://localhost:8080/audit | \
   jq '[.recent_events[] | select(.source_ip == "203.0.113.42")]'
+
+# Check chain integrity
+curl -s http://localhost:8080/audit | jq '.chain_valid'
 ```
 
 ---
 
-## 4. Threat Statistics
+## 6. Threat Statistics
 
-Returns aggregated threat counts for two time windows: the last 5 minutes and the last hour. Useful for dashboards and alerting.
+Aggregated threat counts for two time windows.
 
 **Endpoint:** `GET /stats`
-
-**Authentication:** None required
-
-### Request
 
 ```bash
 curl -s http://localhost:8080/stats | jq .
 ```
 
-### Response
-
-**Status:** `200 OK`
-**Content-Type:** `application/json`
+**Response:**
 
 ```json
 {
@@ -324,114 +215,238 @@ curl -s http://localhost:8080/stats | jq .
 }
 ```
 
-### Response Schema
+| Field | Type | Description |
+|-------|------|-------------|
+| `blocked` | `usize` | Requests blocked by threat score |
+| `rate_limited` | `usize` | Requests denied by rate governor |
+| `sql_injection` | `usize` | SQL injection attempts detected |
+| `ssrf` | `usize` | SSRF attempts blocked |
+| `total_audit_events` | `usize` | Total events in audit chain |
+
+---
+
+## 7. Endpoint Status
+
+Returns endpoint protection engine statistics.
+
+**Endpoint:** `GET /endpoint/status`
+**Requires:** `--endpoint` flag
+
+```bash
+curl -s http://localhost:8080/endpoint/status | jq .
+```
+
+**Response:**
+
+```json
+{
+  "endpoint_protection": "active",
+  "total_files_scanned": 1523,
+  "total_threats_detected": 3,
+  "active_monitors": [
+    "file_watcher",
+    "process_monitor",
+    "network_monitor",
+    "usb_monitor"
+  ],
+  "scanners_active": [
+    "signature_engine",
+    "heuristic_engine",
+    "yara_engine"
+  ],
+  "quarantined_files": 2,
+  "last_scan_time": "2026-03-25T10:15:00Z"
+}
+```
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `last_5min` | `object` | Event counts from the last 5 minutes |
-| `last_hour` | `object` | Event counts from the last hour |
-| `total_audit_events` | `usize` | Total events in the audit chain |
+| `endpoint_protection` | `string` | Always `"active"` when running |
+| `total_files_scanned` | `u64` | Cumulative files scanned since startup |
+| `total_threats_detected` | `u64` | Cumulative threats detected |
+| `active_monitors` | `array<string>` | Running background monitors |
+| `scanners_active` | `array<string>` | Active scan engines |
+| `quarantined_files` | `usize` | Files currently in quarantine vault |
+| `last_scan_time` | `string|null` | RFC 3339 timestamp of most recent detection |
 
-**Time window fields (same for both `last_5min` and `last_hour`):**
+---
+
+## 8. Recent Detections
+
+Returns the 100 most recent endpoint detections.
+
+**Endpoint:** `GET /endpoint/detections`
+**Requires:** `--endpoint` flag
+
+```bash
+curl -s http://localhost:8080/endpoint/detections | jq .
+```
+
+**Response:**
+
+```json
+{
+  "detections": [
+    {
+      "id": "a1b2c3d4-uuid",
+      "timestamp": "2026-03-25T10:14:32Z",
+      "scanner": "signature_engine",
+      "target": "/tmp/eicar.com",
+      "severity": "high",
+      "description": "EICAR-Test-File: EICAR standard antivirus test file",
+      "confidence": 1.0,
+      "action": "quarantine(/tmp/eicar.com)",
+      "artifact_hash": "275a021bbfb6489e54d471899f7db9d1663fc695ec2fe2a2c4538aabf651fd0f"
+    }
+  ],
+  "total": 1
+}
+```
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `blocked` | `usize` | Requests blocked by threat score (`RequestBlocked` events) |
-| `rate_limited` | `usize` | Requests denied by rate governor (`RateLimitHit` events) |
-| `sql_injection` | `usize` | SQL injection attempts detected (`SqlInjectionAttempt` events) |
-| `ssrf` | `usize` | SSRF attempts blocked (`SsrfAttempt` events) |
+| `id` | `string` | UUID v4 detection identifier |
+| `timestamp` | `string` | RFC 3339 UTC timestamp |
+| `scanner` | `string` | Which engine detected it (`signature_engine`, `heuristic_engine`, `yara_engine`, `process_monitor`, `network_monitor`, `dns_filter`, `usb_monitor`, `fim`, `memory_scanner`, `rootkit_detector`) |
+| `target` | `string` | What was scanned (file path, PID, connection, domain) |
+| `severity` | `string` | `info`, `low`, `medium`, `high`, or `critical` |
+| `description` | `string` | Human-readable detection description |
+| `confidence` | `f64` | Confidence score (0.0-1.0) |
+| `action` | `string` | Recommended action taken |
+| `artifact_hash` | `string|null` | SHA-256 of scanned file (if applicable) |
 
-### Examples
+---
 
-**Check if there are active attacks (last 5 minutes):**
+## 9. Quarantine Vault
+
+Lists all files currently held in the encrypted quarantine vault.
+
+**Endpoint:** `GET /endpoint/quarantine`
+**Requires:** `--endpoint` flag
 
 ```bash
-curl -s http://localhost:8080/stats | jq '.last_5min'
-# {
-#   "blocked": 3,
-#   "rate_limited": 12,
-#   "sql_injection": 1,
-#   "ssrf": 0
-# }
+curl -s http://localhost:8080/endpoint/quarantine | jq .
 ```
 
-**Get total blocked in the last hour:**
+**Response:**
 
-```bash
-curl -s http://localhost:8080/stats | jq '.last_hour.blocked'
-# 18
+```json
+{
+  "quarantined_files": [
+    {
+      "id": "q-uuid-here",
+      "original_path": "/tmp/eicar.com",
+      "sha256": "275a021bbfb6489e54d471899f7db9d1663fc695ec2fe2a2c4538aabf651fd0f",
+      "detection_reason": "EICAR-Test-File: EICAR standard antivirus test file",
+      "scanner": "signature_engine",
+      "severity": "high",
+      "quarantined_at": "2026-03-25T10:14:32Z",
+      "file_size": 68
+    }
+  ],
+  "total": 1,
+  "vault_size_bytes": 1024
+}
 ```
 
-**Simple alerting script:**
+| Field | Type | Description |
+|-------|------|-------------|
+| `original_path` | `string` | Where the file was before quarantine |
+| `sha256` | `string` | SHA-256 hash of original file |
+| `detection_reason` | `string` | Why it was quarantined |
+| `scanner` | `string` | Which engine flagged it |
+| `severity` | `string` | Detection severity |
+| `quarantined_at` | `string` | RFC 3339 timestamp |
+| `file_size` | `u64` | Original file size in bytes |
+| `vault_size_bytes` | `u64` | Total quarantine vault disk usage |
+
+---
+
+## 10. On-Demand Scan
+
+Scan a file or directory on-demand via the API.
+
+**Endpoint:** `POST /endpoint/scan`
+**Requires:** `--endpoint` flag
+**Body:** Plain text file or directory path
 
 ```bash
-#!/bin/bash
-BLOCKED=$(curl -s http://localhost:8080/stats | jq '.last_5min.blocked')
-if [ "$BLOCKED" -gt 10 ]; then
-  echo "ALERT: $BLOCKED requests blocked in last 5 minutes"
-fi
+# Scan a file
+curl -X POST http://localhost:8080/endpoint/scan -d "/tmp/suspicious.bin"
+
+# Scan a directory
+curl -X POST http://localhost:8080/endpoint/scan -d "/tmp/downloads/"
 ```
 
-**Continuous monitoring (every 10 seconds):**
+**Response (clean):**
 
-```bash
-watch -n 10 'curl -s http://localhost:8080/stats | jq .'
+```json
+{
+  "path": "/tmp/clean-file.txt",
+  "clean": true,
+  "threats_found": 0,
+  "detections": []
+}
+```
+
+**Response (threat detected):**
+
+```json
+{
+  "path": "/tmp/suspicious.bin",
+  "clean": false,
+  "threats_found": 2,
+  "detections": [
+    {
+      "scanner": "signature_engine",
+      "target": "/tmp/suspicious.bin",
+      "severity": "high",
+      "description": "EICAR-Test-File: EICAR standard antivirus test file",
+      "confidence": 1.0,
+      "artifact_hash": "275a021..."
+    },
+    {
+      "scanner": "yara_engine",
+      "target": "/tmp/suspicious.bin",
+      "severity": "high",
+      "description": "YARA rule 'EICAR_test_file' matched (1 strings: $eicar)",
+      "confidence": 0.95,
+      "artifact_hash": null
+    }
+  ]
+}
+```
+
+**Error (path not found):**
+
+```json
+{
+  "error": "Path does not exist",
+  "path": "/nonexistent/file"
+}
 ```
 
 ---
 
 ## Error Responses
 
-All endpoints pass through the NexusShield security middleware. Requests that trigger security policies will receive error responses instead of the expected endpoint data.
+All endpoints pass through the security middleware. Requests triggering policies receive errors:
 
-### Rate Limited (429)
-
-```
-HTTP/1.1 429 Too Many Requests
-Retry-After: 60
-
-Rate limit exceeded
-```
-
-The `Retry-After` header is included when the client IP is banned, indicating how many seconds until the ban expires.
-
-### Blocked (403)
-
-```
-HTTP/1.1 403 Forbidden
-
-Request blocked by security policy
-```
-
-Returned when the client's threat score exceeds the block threshold (default: 0.7).
-
-### Upstream Unavailable (502)
-
-Only in proxy mode when the upstream service is unreachable:
-
-```
-HTTP/1.1 502 Bad Gateway
-
-Upstream unavailable
-```
-
-### Invalid Upstream URI (400)
-
-Only in proxy mode when the constructed upstream URI is invalid:
-
-```
-HTTP/1.1 400 Bad Request
-
-Invalid upstream URI
-```
+| Status | Body | When |
+|--------|------|------|
+| `429 Too Many Requests` | `Rate limit exceeded` | Rate governor threshold exceeded. Includes `Retry-After` header. |
+| `403 Forbidden` | `Request blocked by security policy` | Threat score exceeds block threshold (default: 0.7) |
+| `502 Bad Gateway` | `Upstream unavailable` | Proxy mode only: upstream service unreachable |
+| `400 Bad Request` | `Invalid upstream URI` | Proxy mode only: constructed URI invalid |
 
 ---
 
 ## Notes
 
-- All 4 endpoints (`/health`, `/status`, `/audit`, `/stats`) are registered as explicit routes and are handled directly by NexusShield, never forwarded to the upstream.
-- The audit endpoint returns a fixed maximum of 50 events. This is not configurable via query parameters.
-- Statistics are computed on-the-fly from the audit chain by scanning events with timestamps after the window boundary. There is no pre-aggregated counter.
-- The `chain_valid` field triggers a full chain verification on every call to `/status` and `/audit`. For chains with 100,000 events, this involves recomputing 100,000 SHA-256 hashes. In production with very large chains, consider polling this less frequently.
-- All timestamps in the `/audit` response use RFC 3339 format with UTC timezone.
-- The `/stats` time windows use the server's UTC clock. Ensure NTP synchronization for accurate window boundaries.
+- Gateway endpoints (`/health`, `/dashboard`, `/status`, `/audit`, `/stats`) are always available in both standalone and proxy modes.
+- Endpoint protection endpoints (`/endpoint/*`) require the `--endpoint` CLI flag.
+- The `/audit` endpoint returns a fixed maximum of 50 events. Not configurable via query parameters.
+- Statistics are computed on-the-fly from the audit chain. No pre-aggregated counters.
+- `chain_valid` triggers a full SHA-256 chain verification on every call. For large chains, poll infrequently.
+- All timestamps use RFC 3339 format with UTC timezone.
+- The `POST /endpoint/scan` endpoint scans synchronously and may take time on large directories.

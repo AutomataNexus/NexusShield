@@ -198,6 +198,8 @@ async fn main() {
     let shield_audit = shield.clone();
     let shield_stats = shield.clone();
     let endpoint_for_routes = endpoint_engine.clone();
+    let shield_events = shield.clone();
+    let shield_report = shield.clone();
 
     // Build endpoint routes if enabled
     let endpoint_routes = if let Some(engine) = endpoint_for_routes {
@@ -243,6 +245,33 @@ async fn main() {
             }))
             .route("/stats", get(move || async move {
                 stats_handler(shield_stats.clone()).await
+            }))
+            .route("/events", get(move || {
+                let audit = shield_events.audit.clone();
+                async move {
+                    nexus_shield::sse_events::audit_event_stream(audit, 500)
+                }
+            }))
+            .route("/report", get(move || {
+                let s = shield_report.clone();
+                async move {
+                    let config = nexus_shield::compliance_report::ReportConfig::default();
+                    let modules = vec![
+                        "sql_firewall".into(), "ssrf_guard".into(), "rate_governor".into(),
+                        "fingerprint".into(), "quarantine".into(), "email_guard".into(),
+                        "credential_vault".into(), "audit_chain".into(), "sanitizer".into(),
+                        "threat_score".into(),
+                    ];
+                    let shield_cfg = serde_json::json!({
+                        "block_threshold": s.config.block_threshold,
+                        "warn_threshold": s.config.warn_threshold,
+                        "rate_rps": s.config.rate.requests_per_second,
+                    });
+                    let html = nexus_shield::compliance_report::generate_html_report(
+                        &s.audit, &config, &modules, &shield_cfg,
+                    );
+                    Html(html)
+                }
             }));
 
         if let Some(ep_routes) = endpoint_routes {

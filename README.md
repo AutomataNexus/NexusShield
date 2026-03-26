@@ -10,11 +10,11 @@
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-BSL--1.1-blue.svg" alt="License: BSL-1.1" /></a>
-  <img src="https://img.shields.io/badge/Rust-1.75%2B-orange.svg" alt="Rust 1.75+" />
-  <img src="https://img.shields.io/badge/version-0.3.0-green.svg" alt="v0.3.0" />
+  <img src="https://img.shields.io/badge/Rust-1.85%2B_(2024_edition)-orange.svg" alt="Rust 1.85+" />
+  <img src="https://img.shields.io/badge/version-0.4.0-green.svg" alt="v0.4.0" />
   <img src="https://img.shields.io/badge/LOC-10,635-informational.svg" alt="10,635 LOC" />
-  <img src="https://img.shields.io/badge/modules-24-blueviolet.svg" alt="24 modules" />
-  <img src="https://img.shields.io/badge/tests-275-brightgreen.svg" alt="275 tests" />
+  <img src="https://img.shields.io/badge/modules-33-blueviolet.svg" alt="33 modules" />
+  <img src="https://img.shields.io/badge/tests-384-brightgreen.svg" alt="384 tests" />
 </p>
 
 ---
@@ -87,30 +87,30 @@ Both systems feed into the same tamper-evident SHA-256 hash-chained audit log, u
 | `threat_score` | Multi-signal threat scoring (fingerprint 30%, rate 25%, behavioral 30%, history 15%) |
 | `config` | Centralized configuration with TOML support |
 
-### Endpoint Protection Engine (12 modules, 5,055 lines)
+### Endpoint Protection Engine (18 modules)
 
 ```
-  File Events (inotify)     /proc Polling     /proc/net/tcp
-        |                       |                   |
-        v                       v                   v
-  +----------+          +-----------+        +-----------+
-  | Watcher  |          | Process   |        | Network   |
-  |          |          | Monitor   |        | Monitor   |
-  +----------+          +-----------+        +-----------+
-        |                    |                    |
-        v                    v                    v
-  +---------------------------------------------------+
-  |            EndpointEngine Orchestrator             |
-  |                                                    |
-  |  Scanners:                                         |
-  |  [SignatureEngine] [HeuristicEngine] [YaraEngine]  |
-  +---------------------------------------------------+
-        |              |              |
-        v              v              v
-  +-----------+  +-----------+  +-----------+
-  | Quarantine|  | Audit     |  | Broadcast |
-  | Vault     |  | Chain     |  | Channel   |
-  +-----------+  +-----------+  +-----------+
+  File Events (inotify)     /proc Polling     /proc/net/tcp     DNS Queries
+        |                       |                   |                |
+        v                       v                   v                v
+  +----------+          +-----------+        +-----------+    +-----------+
+  | Watcher  |          | Process   |        | Network   |    |   DNS     |
+  |          |          | Monitor   |        | Monitor   |    |  Filter   |
+  +----------+          +-----------+        +-----------+    +-----------+
+        |                    |                    |                |
+        v                    v                    v                v
+  +----------------------------------------------------------------+
+  |               EndpointEngine Orchestrator                       |
+  |                                                                 |
+  |  Scanners:                                                      |
+  |  [SignatureEngine] [HeuristicEngine] [YaraEngine]               |
+  +----------------------------------------------------------------+
+        |              |              |              |
+        v              v              v              v
+  +-----------+  +-----------+  +-----------+  +-----------+
+  | Quarantine|  | Audit     |  | Broadcast |  | Threat    |
+  | Vault     |  | Chain     |  | Channel   |  | Intel DB  |
+  +-----------+  +-----------+  +-----------+  +-----------+
 ```
 
 | Module | Description | Key Features |
@@ -126,6 +126,11 @@ Both systems feed into the same tamper-evident SHA-256 hash-chained audit log, u
 | `endpoint::rootkit_detector` | System integrity verification | System binary hash baseline, 20 known rootkit module names, LD_PRELOAD detection, hidden process detection |
 | `endpoint::file_quarantine` | Encrypted quarantine vault | SHA-256 chain of custody, permission stripping, restore capability, auto-expiry, atomic index persistence |
 | `endpoint::threat_intel` | IOC database | 20 malicious IPs, 20 malicious domains, 10 IOC hashes, file-based persistence, community feed support |
+| `endpoint::dns_filter` | DNS filtering proxy | UDP DNS proxy on 127.0.0.1:5353, blocks malicious domains via threat intel + custom blocklist, sinkhole responses, upstream forwarding, query logging |
+| `endpoint::usb_monitor` | USB/removable media monitoring | /sys/block polling, new device detection, auto-scan mounted volumes, autorun.inf detection, hidden executable detection, suspicious script detection |
+| `endpoint::fim` | File integrity monitoring | SHA-256 baselines of /etc, /usr/bin, /sbin; detects modifications, new files, deletions, permission/ownership changes; persistent baselines; path-aware severity |
+| `endpoint::container_scanner` | Docker image scanning | Image inspect, root user detection, hardcoded secrets, dangerous base images, suspicious packages (nmap/netcat/sqlmap), pipe-to-shell, privileged mode, deep layer scanning with all engines |
+| `endpoint::supply_chain` | Dependency scanning | Cargo.lock, package-lock.json, requirements.txt, go.sum parsing; known-malicious packages; typosquat detection (Levenshtein); suspicious versions; dependency confusion; custom registry detection |
 | `endpoint::allowlist` | Developer-aware allowlist | Auto-detects Rust, Node, Python, Go, Docker, Java, C/C++, IDEs, Git. Component + extension + substring matching. |
 
 ---
@@ -199,6 +204,8 @@ cargo test
 | `GET` | `/status` | Shield status JSON |
 | `GET` | `/audit` | Recent audit events (last 50) |
 | `GET` | `/stats` | Request statistics (5min / 1hr) |
+| `GET` | `/events` | SSE real-time event stream |
+| `GET` | `/report` | HTML compliance report |
 
 ### Endpoint Protection Endpoints (when `--endpoint` is enabled)
 
@@ -309,7 +316,119 @@ Reads `/proc/[pid]/maps` to find RWX (read-write-execute) regions and scans for:
 - Reverse TCP socket setup
 - Meterpreter/Metasploit/Cobalt Strike markers
 
-### 7. Rootkit Detector
+### 7. DNS Filter
+
+Lightweight UDP DNS proxy that intercepts and inspects every DNS query:
+
+- **Malicious domain blocking**: Checks all queries against threat intel database + custom blocklist
+- **Sinkhole responses**: Blocked domains resolve to `0.0.0.0` (prevents connection)
+- **Upstream forwarding**: Clean queries forwarded to configurable upstream (default: 8.8.8.8)
+- **Subdomain matching**: Blocking `evil.com` also blocks `sub.evil.com`
+- **Whitelist override**: Critical domains can be whitelisted to never block
+- **Runtime management**: Add/remove blocked domains via API without restart
+- **Query logging**: Optional logging of all DNS queries for forensics
+- **Stats tracking**: Total queries, blocked count, top blocked domains
+
+```bash
+# Enable DNS filter
+./target/release/nexus-shield --standalone --endpoint --dns-filter --port 8080
+
+# Point your system DNS to the filter
+echo "nameserver 127.0.0.1" | sudo tee /etc/resolv.conf
+# Or use port 5353 directly for per-app filtering
+```
+
+### 8. USB/Removable Media Monitor
+
+Polls `/sys/block` and `/proc/mounts` every 3 seconds for:
+
+- **Device insertion detection**: Alerts when new block devices appear (USB drives, SD cards)
+- **Removable device identification**: Reads `/sys/block/<dev>/removable`, vendor, model, size
+- **Auto-scan mounted volumes**: When a new filesystem is mounted, scans root for threats
+- **Autorun detection**: Finds `autorun.inf`, `autorun.sh`, `.autorun`, `autoexec.bat`, `desktop.ini` and other autoplay files
+- **Hidden executable detection**: Dotfiles with execute permission on removable media
+- **Suspicious script detection**: `.bat`, `.cmd`, `.ps1`, `.vbs`, `.wsf`, `.hta`, `.scr` files at volume root
+- **Filesystem type alerting**: Flags mounts with `ntfs`, `vfat`, `exfat`, `hfsplus`, `udf` (common removable media types)
+
+Enabled by default. Zero false positives — only alerts on genuinely new devices/mounts, not existing ones at startup.
+
+### 9. File Integrity Monitor (FIM)
+
+Baselines critical system files with SHA-256 hashes and detects unauthorized changes. Replaces OSSEC and Tripwire.
+
+**Monitored by default:**
+- `/etc/passwd`, `/etc/shadow`, `/etc/sudoers`, `/etc/hosts`, `/etc/ssh/sshd_config`, `/etc/ld.so.preload`, `/etc/crontab`
+- All files in `/usr/bin`, `/usr/sbin`, `/bin`, `/sbin`, `/etc`
+
+**Detection types:**
+
+| Change | Severity | Description |
+|--------|----------|-------------|
+| Content modified (hash changed) | Critical/High/Medium | Based on path: `/etc/passwd` = Critical, `/usr/bin/*` = High, `/etc/*` = Medium |
+| File created | Medium | New file appears in monitored directory |
+| File deleted | High | Baselined file disappears |
+| Permissions changed | Medium | Unix mode bits changed (e.g., 644 -> 777) |
+| Ownership changed | High | UID or GID changed |
+
+**Features:**
+- Persistent baselines (survives restarts)
+- Configurable polling interval (default: 60s)
+- Exclude patterns for dynamic files
+- `update_baseline()` to accept legitimate changes
+
+### 10. Container Image Scanner
+
+Inspects Docker images before they run, using `docker inspect` and `docker history`:
+
+| Check | Severity | Description |
+|-------|----------|-------------|
+| Running as root | Medium | No USER directive or USER root/0 |
+| Hardcoded secrets | High | `password=`, `api_key=`, `aws_secret`, etc. in ENV vars (values redacted in alerts) |
+| Dangerous base image | High | kalilinux, parrotsec, known offensive images |
+| Suspicious packages | Medium | nmap, netcat, socat, hydra, sqlmap, metasploit, etc. installed via apt/yum/apk |
+| Pipe-to-shell | High | `curl ... \| bash` or `wget ... \| sh` patterns in Dockerfile |
+| Privileged mode | High | `--privileged` or `CAP_SYS_ADMIN` in image layers |
+| Suspicious ports | Medium | 4444, 5555, 6667, 1337, 31337 exposed |
+| World-writable perms | Medium | `chmod 777` in build history |
+| Security disabled | High | SELinux/AppArmor/seccomp disabled in layers |
+
+**Deep scan mode**: Exports the image filesystem and runs all scan engines (signatures, heuristics, YARA) on extracted binaries in `/usr/bin`, `/usr/sbin`, `/tmp`, `/root`.
+
+```bash
+# Scan via API
+curl -X POST http://localhost:8080/endpoint/scan -d "docker://myapp:latest"
+
+# Scan via CLI
+./target/release/nexus-shield --scan-file docker://nginx:latest
+```
+
+### 11. Supply Chain Scanner
+
+Parses dependency lock files and detects supply chain attacks:
+
+**Supported lock files:** `Cargo.lock`, `package-lock.json`, `yarn.lock`, `requirements.txt`, `Pipfile.lock`, `go.sum`
+
+| Check | Severity | Description |
+|-------|----------|-------------|
+| Known-malicious package | Critical | Exact match against database of known-malicious packages (event-stream, flatmap-stream, rustdecimal, etc.) |
+| Typosquat detection | High | Levenshtein distance <= 2 from popular packages (e.g., "serda" vs "serde", "expres" vs "express") |
+| Suspicious version | Low | `0.0.x` versions on established-sounding packages |
+| Custom registry | Medium | Packages resolved from non-standard registries (dependency confusion) |
+
+**Popular package databases** (for typosquat detection):
+- **Rust**: 26 top crates (serde, tokio, reqwest, clap, axum, etc.)
+- **npm**: 24 top packages (express, react, lodash, axios, etc.)
+- **PyPI**: 18 top packages (requests, numpy, pandas, flask, etc.)
+
+```bash
+# Scan your project's dependencies
+./target/release/nexus-shield --scan-file Cargo.lock
+./target/release/nexus-shield --scan-file package-lock.json
+./target/release/nexus-shield --scan-file requirements.txt
+./target/release/nexus-shield --scan-file go.sum
+```
+
+### 12. Rootkit Detector
 
 - **System binary integrity**: SHA-256 baseline of `/usr/bin`, `/usr/sbin`, `/bin`, `/sbin` with modification detection
 - **Kernel module check**: 20 known rootkit module names (diamorphine, reptile, bdvl, suterusu, etc.)
@@ -394,6 +513,9 @@ enable_process_monitor = true
 enable_network_monitor = true
 enable_memory_scanner = false        # requires elevated privileges
 enable_rootkit_detector = false      # requires root
+enable_dns_filter = false            # opt-in: intercepts DNS queries
+enable_usb_monitor = true            # monitors for USB device insertions
+enable_fim = false                   # file integrity monitoring (baselines /etc, /usr/bin)
 
 [endpoint.watcher]
 watch_paths = ["/home", "/tmp"]
@@ -410,10 +532,183 @@ crypto_duration_secs = 60
 poll_interval_ms = 5000
 suspicious_ports = [4444, 5555, 8888, 6667, 6697, 1337, 31337]
 
+[endpoint.fim]
+poll_interval_ms = 60000             # 1 minute
+watch_dirs = ["/etc", "/usr/bin", "/usr/sbin"]
+watch_files = ["/etc/passwd", "/etc/shadow", "/etc/sudoers"]
+alert_on_new_files = true
+alert_on_deleted_files = true
+alert_on_permission_changes = true
+
+[endpoint.usb_monitor]
+poll_interval_ms = 3000
+auto_scan_new_volumes = true
+alert_on_insertion = true
+max_scan_file_size = 104857600       # 100 MB
+
+[endpoint.dns_filter]
+listen_addr = "127.0.0.1:5353"
+upstream_dns = "8.8.8.8:53"
+upstream_timeout_ms = 3000
+log_all_queries = false
+custom_blocklist = ["evil-domain.com", "phishing-site.net"]
+whitelist = ["localhost"]
+
 [endpoint.allowlist]
 auto_detect = true
 custom_allow_processes = ["my-tool"]
+
+[siem]
+enabled = false
+min_threat_score = 0.0               # 0.0 = all events, 0.7 = high+ only
+batch_size = 1                       # 1 = real-time, >1 = batched
+flush_interval_ms = 5000
+source_name = "nexus-shield"
+
+# Syslog (UDP)
+[[siem.destinations]]
+type = "syslog_udp"
+host = "siem.company.com"
+port = 514
+
+# Elasticsearch
+[[siem.destinations]]
+type = "elasticsearch"
+url = "https://es.company.com:9200"
+index = "nexus-shield-events"
+api_key = "your-api-key"
+
+# Splunk HEC
+[[siem.destinations]]
+type = "splunk_hec"
+url = "https://splunk.company.com:8088/services/collector"
+token = "your-hec-token"
+index = "security"
+
+# Generic webhook (Slack, PagerDuty, custom)
+[[siem.destinations]]
+type = "webhook"
+url = "https://hooks.slack.com/services/xxx/yyy/zzz"
 ```
+
+---
+
+## SIEM Integration
+
+NexusShield forwards audit chain events to external SIEM platforms in real-time. Every event includes the SHA-256 chain hash for tamper-evidence verification.
+
+### Supported Destinations
+
+| Destination | Protocol | Format |
+|-------------|----------|--------|
+| **Syslog** | UDP or TCP | RFC 5424 with structured data |
+| **Elasticsearch** | HTTP | Bulk index API (NDJSON) |
+| **Splunk HEC** | HTTP | Splunk HTTP Event Collector JSON |
+| **Webhook** | HTTP POST | Generic JSON payload |
+
+### Event Format
+
+Every exported event includes:
+
+```json
+{
+  "timestamp": "2026-03-25T12:00:00Z",
+  "source": "nexus-shield",
+  "event_type": "SqlInjectionAttempt",
+  "severity": "high",
+  "severity_id": 9,
+  "source_ip": "192.168.1.100",
+  "threat_score": 0.85,
+  "description": "UNION SELECT attack detected",
+  "event_id": "uuid-here",
+  "chain_hash": "sha256-hash"
+}
+```
+
+### Syslog Output (RFC 5424)
+
+```
+<82>1 2026-03-25T12:00:00Z hostname nexus-shield - - [nexus-shield@49681 eventType="SqlInjectionAttempt" severity="high" threatScore="0.850" sourceIp="192.168.1.100"] UNION SELECT attack detected
+```
+
+### Features
+
+- **Multi-destination**: Forward to multiple SIEMs simultaneously
+- **Filtering**: Set minimum threat score to reduce noise (e.g., 0.7 = high+ only)
+- **Batching**: Real-time (batch_size=1) or batched for high-throughput environments
+- **CEF compatible**: Severity IDs map to Common Event Format (0-10)
+- **Chain integrity**: Every event carries its SHA-256 chain hash for verification
+
+---
+
+## Real-Time Event Stream (SSE)
+
+The `/events` endpoint streams security events in real-time using Server-Sent Events:
+
+```bash
+# Stream events in terminal
+curl -N http://localhost:8080/events
+
+# Browser JavaScript
+const es = new EventSource('/events');
+es.addEventListener('security', (e) => {
+  const event = JSON.parse(e.data);
+  console.log(`[${event.event_type}] ${event.source_ip}: ${event.details}`);
+});
+```
+
+**Event format:**
+```json
+event: security
+id: uuid-here
+data: {"type":"audit_event","event_type":"RequestBlocked","source_ip":"1.2.3.4","threat_score":0.85,...}
+```
+
+- 15-second keepalive heartbeat
+- No polling — events pushed as they occur
+- Compatible with EventSource API in all browsers
+
+---
+
+## Systemd Journal Integration
+
+Security events are written to the systemd journal with structured fields:
+
+```bash
+# View NexusShield events
+journalctl -u nexus-shield -f
+
+# Filter by priority (warnings and above)
+journalctl -u nexus-shield -p warning
+
+# JSON output for parsing
+journalctl -u nexus-shield -o json | jq '.MESSAGE'
+```
+
+Each event includes structured fields: `EVENT_TYPE`, `SOURCE_IP`, `THREAT_SCORE`, `EVENT_ID`, `CHAIN_HASH` — accessible via `journalctl -o json`.
+
+---
+
+## Compliance Reports
+
+Generate HTML security posture reports for auditors at `/report`:
+
+```bash
+# View in browser
+open http://localhost:8080/report
+
+# Save to file
+curl -s http://localhost:8080/report > compliance-report.html
+```
+
+**Report includes:**
+- Executive summary (threat counts, chain integrity)
+- Severity breakdown with color-coded bars
+- Active module inventory
+- Configuration audit
+- Top threat source IPs
+- Full event log table (optional)
+- Print-friendly CSS
 
 ---
 
@@ -423,6 +718,10 @@ custom_allow_processes = ["my-tool"]
 nexus-shield/                        10,635 lines of Rust
   src/
     lib.rs                           Shield orchestrator + middleware
+    siem_export.rs                   SIEM integration (Syslog, ES, Splunk, webhook)
+    sse_events.rs                    Server-Sent Events real-time streaming
+    journal.rs                       Systemd journal integration
+    compliance_report.rs             HTML/JSON compliance report generator
     config.rs                        ShieldConfig with defaults
     sql_firewall.rs                  AST-level SQL injection detection
     ssrf_guard.rs                    SSRF/IP/DNS validation
@@ -436,6 +735,11 @@ nexus-shield/                        10,635 lines of Rust
     threat_score.rs                  Multi-signal threat scoring
     endpoint/
       mod.rs                         EndpointEngine, Scanner trait, core types
+      container_scanner.rs             Docker image security scanning
+      supply_chain.rs                 Dependency lock file scanning (typosquat, malicious, confusion)
+      dns_filter.rs                  DNS filtering proxy with threat intel integration
+      fim.rs                         File integrity monitoring (OSSEC/Tripwire replacement)
+      usb_monitor.rs                 USB/removable media monitoring and auto-scan
       allowlist.rs                   Developer-aware toolchain detection
       signatures.rs                  SHA-256 signature matching
       heuristics.rs                  Entropy, ELF, mismatch, obfuscation

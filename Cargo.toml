@@ -1,8 +1,8 @@
 [package]
 name = "nexus-shield"
-version = "0.3.2"
-edition = "2021"
-rust-version = "1.75"
+version = "0.4.0"
+edition = "2024"
+rust-version = "1.85"
 authors = ["Andrew Jewell Sr. - AutomataNexus"]
 license = "MIT"
 description = "Adaptive zero-trust security gateway with real-time endpoint protection — SQL firewall, SSRF guard, malware detection, process monitoring, network analysis, rootkit detection"
@@ -82,6 +82,11 @@ glob = "0.3"
 
 # Endpoint protection: regex for pattern detection
 regex = "1"
+
+# SSE real-time event streaming
+async-stream = "0.3"
+tokio-stream = "0.1"
+futures = "0.3"
 
 [[bin]]
 name = "nexus-shield"

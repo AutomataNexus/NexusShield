@@ -11,14 +11,19 @@
 //! on dev machines.
 
 pub mod allowlist;
+pub mod container_scanner;
+pub mod dns_filter;
 pub mod file_quarantine;
+pub mod fim;
 pub mod heuristics;
 pub mod memory_scanner;
 pub mod network_monitor;
 pub mod process_monitor;
 pub mod rootkit_detector;
 pub mod signatures;
+pub mod supply_chain;
 pub mod threat_intel;
+pub mod usb_monitor;
 pub mod watcher;
 pub mod yara_engine;
 
@@ -209,6 +214,9 @@ pub struct EndpointConfig {
     pub enable_network_monitor: bool,
     pub enable_memory_scanner: bool,
     pub enable_rootkit_detector: bool,
+    pub enable_dns_filter: bool,
+    pub enable_usb_monitor: bool,
+    pub enable_fim: bool,
     pub data_dir: PathBuf,
     pub watcher: watcher::WatcherConfig,
     pub process_monitor: process_monitor::ProcessMonitorConfig,
@@ -220,6 +228,9 @@ pub struct EndpointConfig {
     pub allowlist: allowlist::AllowlistConfig,
     pub threat_intel: threat_intel::ThreatIntelConfig,
     pub signatures: signatures::SignatureConfig,
+    pub dns_filter: dns_filter::DnsFilterConfig,
+    pub usb_monitor: usb_monitor::UsbMonitorConfig,
+    pub fim: fim::FimConfig,
 }
 
 impl Default for EndpointConfig {
@@ -232,6 +243,9 @@ impl Default for EndpointConfig {
             enable_network_monitor: true,
             enable_memory_scanner: false, // requires elevated privileges
             enable_rootkit_detector: false, // requires root
+            enable_dns_filter: false, // opt-in: requires configuring system DNS
+            enable_usb_monitor: true, // on by default: monitors for USB insertions
+            enable_fim: false, // opt-in: baselines system files, alerts on changes
             data_dir: data_dir.clone(),
             watcher: watcher::WatcherConfig::default(),
             process_monitor: process_monitor::ProcessMonitorConfig::default(),
@@ -243,6 +257,9 @@ impl Default for EndpointConfig {
             allowlist: allowlist::AllowlistConfig::default(),
             threat_intel: threat_intel::ThreatIntelConfig::new(data_dir.join("threat-intel")),
             signatures: signatures::SignatureConfig::new(data_dir.join("signatures.ndjson")),
+            dns_filter: dns_filter::DnsFilterConfig::default(),
+            usb_monitor: usb_monitor::UsbMonitorConfig::default(),
+            fim: fim::FimConfig::default(),
         }
     }
 }
@@ -282,6 +299,8 @@ pub struct EndpointEngine {
     pub threat_intel: Arc<threat_intel::ThreatIntelDB>,
     /// File quarantine vault.
     pub quarantine: Arc<file_quarantine::QuarantineVault>,
+    /// DNS filtering proxy.
+    pub dns_filter: Option<Arc<dns_filter::DnsFilter>>,
     /// Broadcast channel for real-time scan results.
     result_tx: tokio::sync::broadcast::Sender<ScanResult>,
     /// Detection history (ring buffer).
@@ -305,6 +324,16 @@ impl EndpointEngine {
         let threat_intel = Arc::new(threat_intel::ThreatIntelDB::new(config.threat_intel.clone()));
         let quarantine = Arc::new(file_quarantine::QuarantineVault::new(config.quarantine.clone()));
 
+        // DNS filter (if enabled)
+        let dns_filter = if config.enable_dns_filter {
+            Some(Arc::new(dns_filter::DnsFilter::new(
+                config.dns_filter.clone(),
+                Arc::clone(&threat_intel),
+            )))
+        } else {
+            None
+        };
+
         // Build scanner list
         let mut scanners: Vec<Arc<dyn Scanner>> = Vec::new();
 
@@ -325,6 +354,7 @@ impl EndpointEngine {
             allowlist,
             threat_intel,
             quarantine,
+            dns_filter,
             result_tx,
             history: Arc::new(RwLock::new(VecDeque::with_capacity(10000))),
             config,
@@ -420,6 +450,109 @@ impl EndpointEngine {
             handles.push(handle);
         }
 
+        // Start DNS filter proxy
+        if self.config.enable_dns_filter {
+            if let Some(ref dns) = self.dns_filter {
+                let (dns_tx, mut dns_rx) = tokio::sync::mpsc::unbounded_channel::<ScanResult>();
+                let dns_handle = Arc::clone(dns).start(dns_tx);
+                handles.push(dns_handle);
+
+                // DNS detection consumer
+                let history = Arc::clone(&self.history);
+                let audit3 = Arc::clone(&audit);
+                let result_tx = self.result_tx.clone();
+                let threats_detected = &self.threats_detected as *const AtomicU64 as usize;
+                let dns_consumer = tokio::spawn(async move {
+                    while let Some(result) = dns_rx.recv().await {
+                        unsafe {
+                            (*(threats_detected as *const AtomicU64)).fetch_add(1, Ordering::Relaxed);
+                        }
+                        audit3.record(
+                            SecurityEventType::MalwareDetected,
+                            &result.target,
+                            &result.description,
+                            result.confidence,
+                        );
+                        let _ = result_tx.send(result.clone());
+                        let mut hist = history.write();
+                        if hist.len() >= 10000 {
+                            hist.pop_front();
+                        }
+                        hist.push_back(result);
+                    }
+                });
+                handles.push(dns_consumer);
+            }
+        }
+
+        // Start USB monitor
+        if self.config.enable_usb_monitor {
+            let (usb_tx, mut usb_rx) = tokio::sync::mpsc::unbounded_channel::<ScanResult>();
+            let usb_mon = Arc::new(usb_monitor::UsbMonitor::new(self.config.usb_monitor.clone()));
+            let usb_handle = Arc::clone(&usb_mon).start(usb_tx);
+            handles.push(usb_handle);
+
+            // USB detection consumer
+            let history = Arc::clone(&self.history);
+            let audit4 = Arc::clone(&audit);
+            let result_tx = self.result_tx.clone();
+            let threats_detected = &self.threats_detected as *const AtomicU64 as usize;
+            let usb_consumer = tokio::spawn(async move {
+                while let Some(result) = usb_rx.recv().await {
+                    unsafe {
+                        (*(threats_detected as *const AtomicU64)).fetch_add(1, Ordering::Relaxed);
+                    }
+                    audit4.record(
+                        SecurityEventType::MalwareDetected,
+                        &result.target,
+                        &result.description,
+                        result.confidence,
+                    );
+                    let _ = result_tx.send(result.clone());
+                    let mut hist = history.write();
+                    if hist.len() >= 10000 {
+                        hist.pop_front();
+                    }
+                    hist.push_back(result);
+                }
+            });
+            handles.push(usb_consumer);
+        }
+
+        // Start File Integrity Monitor
+        if self.config.enable_fim {
+            let (fim_tx, mut fim_rx) = tokio::sync::mpsc::unbounded_channel::<ScanResult>();
+            let fim_mon = Arc::new(fim::FimMonitor::new(self.config.fim.clone()));
+            let fim_handle = Arc::clone(&fim_mon).start(fim_tx);
+            handles.push(fim_handle);
+
+            // FIM detection consumer
+            let history = Arc::clone(&self.history);
+            let audit5 = Arc::clone(&audit);
+            let result_tx = self.result_tx.clone();
+            let threats_detected = &self.threats_detected as *const AtomicU64 as usize;
+            let fim_consumer = tokio::spawn(async move {
+                while let Some(result) = fim_rx.recv().await {
+                    unsafe {
+                        (*(threats_detected as *const AtomicU64)).fetch_add(1, Ordering::Relaxed);
+                    }
+                    audit5.record(
+                        SecurityEventType::MalwareDetected,
+                        &result.target,
+                        &result.description,
+                        result.confidence,
+                    );
+                    let _ = result_tx.send(result.clone());
+                    let mut hist = history.write();
+                    if hist.len() >= 10000 {
+                        hist.pop_front();
+                    }
+                    hist.push_back(result);
+                }
+            });
+            handles.push(fim_consumer);
+        }
+
         handles
     }
 
@@ -502,6 +635,15 @@ impl EndpointEngine {
         }
         if self.config.enable_rootkit_detector {
             active.push("rootkit_detector".to_string());
+        }
+        if self.config.enable_dns_filter {
+            active.push("dns_filter".to_string());
+        }
+        if self.config.enable_usb_monitor {
+            active.push("usb_monitor".to_string());
+        }
+        if self.config.enable_fim {
+            active.push("fim".to_string());
         }
 
         let scanner_names: Vec<String> = self
@@ -623,5 +765,8 @@ mod tests {
         assert!(config.enable_process_monitor);
         assert!(!config.enable_memory_scanner); // requires elevated
         assert!(!config.enable_rootkit_detector); // requires root
+        assert!(!config.enable_dns_filter); // opt-in
+        assert!(config.enable_usb_monitor); // on by default
+        assert!(!config.enable_fim); // opt-in
     }
 }
