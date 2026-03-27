@@ -34,6 +34,7 @@ pub mod ferrum_integration;
 pub mod fingerprint;
 pub mod journal;
 pub mod metrics;
+pub mod nexuspulse_integration;
 pub mod quarantine;
 pub mod rate_governor;
 pub mod sanitizer;

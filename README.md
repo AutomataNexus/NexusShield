@@ -11,9 +11,9 @@
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-BSL--1.1-blue.svg" alt="License: BSL-1.1" /></a>
   <img src="https://img.shields.io/badge/Rust-1.85%2B_(2024_edition)-orange.svg" alt="Rust 1.85+" />
-  <img src="https://img.shields.io/badge/version-0.4.2-green.svg" alt="v0.4.2" />
-  <img src="https://img.shields.io/badge/modules-39-blueviolet.svg" alt="39 modules" />
-  <img src="https://img.shields.io/badge/tests-407-brightgreen.svg" alt="407 tests" />
+  <img src="https://img.shields.io/badge/version-0.4.3-green.svg" alt="v0.4.3" />
+  <img src="https://img.shields.io/badge/modules-40-blueviolet.svg" alt="40 modules" />
+  <img src="https://img.shields.io/badge/tests-413-brightgreen.svg" alt="413 tests" />
 </p>
 
 ---
@@ -794,6 +794,28 @@ Emails include color-coded severity headers, event details table, chain hash for
 
 ---
 
+## NexusPulse Integration (SMS Alerts)
+
+Send SMS security alerts via the NexusPulse notification platform:
+
+```toml
+[nexus_pulse]
+api_url = "http://localhost:8100"
+api_key = "your-nexuspulse-api-key"
+alert_recipients = ["+12345678900", "+19876543210"]
+min_severity = "critical"
+use_template = true
+```
+
+**Features:**
+- Uses NexusPulse's built-in `alert` template for formatted severity messages
+- High-priority delivery for critical events (bypasses NexusPulse queue backpressure)
+- Idempotency keys per event ID (prevents duplicate alerts)
+- Event metadata attached to each SMS for traceability
+- Falls back to plain SMS body if `use_template = false`
+
+---
+
 ## Automatic Signature Updates
 
 Pull malware signatures from a remote NDJSON feed on a timer:
@@ -843,6 +865,7 @@ nexus-shield/                        10,635 lines of Rust
     compliance_report.rs             HTML/JSON compliance report generator
     webhook.rs                       Webhook alerts (Slack, Discord, generic)
     ferrum_integration.rs            Ferrum-Mail email alert integration
+    nexuspulse_integration.rs        NexusPulse SMS alert integration
     signature_updater.rs             Automatic signature database updates
     metrics.rs                       Prometheus /metrics endpoint
     config.rs                        ShieldConfig with defaults
