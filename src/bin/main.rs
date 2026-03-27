@@ -206,6 +206,7 @@ async fn main() {
         let journal_config = nexus_shield::journal::JournalConfig::default();
         let webhook_configs = shield.config.webhook_urls.clone();
         let ferrum_config = shield.config.ferrum_mail.clone();
+        let pulse_config = shield.config.nexus_pulse.clone();
 
         tokio::spawn(async move {
             let mut last_count = audit_fwd.len();
@@ -221,6 +222,7 @@ async fn main() {
                             nexus_shield::webhook::fire_webhooks(event, &webhook_configs).await;
                         }
                         nexus_shield::ferrum_integration::maybe_send_alert(event, &ferrum_config).await;
+                        nexus_shield::nexuspulse_integration::maybe_send_sms(event, &pulse_config).await;
                     }
                     last_count = current_count;
                 }

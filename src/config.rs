@@ -58,6 +58,29 @@ pub struct ShieldConfig {
     /// Signature auto-update configuration.
     #[serde(default)]
     pub signature_update: Option<SignatureUpdateConfig>,
+    /// NexusPulse SMS alert integration.
+    #[serde(default)]
+    pub nexus_pulse: Option<NexusPulseConfig>,
+}
+
+/// NexusPulse SMS alert configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NexusPulseConfig {
+    /// NexusPulse API base URL (e.g., http://localhost:8100).
+    pub api_url: String,
+    /// API key for NexusPulse authentication.
+    pub api_key: String,
+    /// Phone numbers to receive SMS alerts (E.164 format).
+    pub alert_recipients: Vec<String>,
+    /// Sender phone number (optional, uses NexusPulse default if omitted).
+    #[serde(default)]
+    pub from_number: Option<String>,
+    /// Minimum severity to trigger SMS (default: critical).
+    #[serde(default = "default_pulse_min_severity")]
+    pub min_severity: String,
+    /// Use the built-in "alert" template for formatted messages.
+    #[serde(default = "default_true")]
+    pub use_template: bool,
 }
 
 fn default_block_threshold() -> f64 { 0.7 }
@@ -118,6 +141,7 @@ pub struct SignatureUpdateConfig {
 }
 
 fn default_sig_interval() -> u64 { 3600 }
+fn default_pulse_min_severity() -> String { "critical".to_string() }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SqlFirewallConfig {
@@ -227,6 +251,7 @@ impl Default for ShieldConfig {
             webhook_urls: Vec::new(),
             ferrum_mail: None,
             signature_update: None,
+            nexus_pulse: None,
         }
     }
 }
