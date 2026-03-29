@@ -323,6 +323,12 @@ impl EndpointEngine {
     pub fn new(config: EndpointConfig) -> Self {
         let (result_tx, _) = tokio::sync::broadcast::channel(1024);
 
+        // Ensure data directory exists
+        let _ = std::fs::create_dir_all(&config.data_dir);
+        let _ = std::fs::create_dir_all(config.data_dir.join("quarantine"));
+        let _ = std::fs::create_dir_all(config.data_dir.join("threat-intel"));
+        tracing::info!(data_dir = %config.data_dir.display(), "Endpoint data directory initialized");
+
         // Initialize subsystems
         let allowlist = Arc::new(allowlist::DeveloperAllowlist::new(config.allowlist.clone()));
         let threat_intel = Arc::new(threat_intel::ThreatIntelDB::new(config.threat_intel.clone()));
@@ -413,6 +419,8 @@ impl EndpointEngine {
 
             let handle = tokio::spawn(async move {
                 while let Some(path) = scan_rx.recv().await {
+                    tracing::debug!(file = %path.display(), "Scanning file");
+
                     // Run all scanners on the file
                     let mut all_results = Vec::new();
                     for scanner in &scanners {
@@ -423,6 +431,16 @@ impl EndpointEngine {
                     }
 
                     files_scanned.fetch_add(1, Ordering::Relaxed);
+
+                    if all_results.is_empty() {
+                        tracing::trace!(file = %path.display(), "File clean");
+                    } else {
+                        tracing::warn!(
+                            file = %path.display(),
+                            threats = all_results.len(),
+                            "THREAT DETECTED"
+                        );
+                    }
 
                     // Process results
                     for result in all_results {

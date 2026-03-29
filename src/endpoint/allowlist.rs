@@ -181,21 +181,19 @@ impl DeveloperAllowlist {
         }
 
         // === Build artifacts & caches (always skip) ===
-        paths.push(".cache".to_string());
+        // Use absolute path to avoid substring matching on random ".cache" in filenames
+        let cache_dir = format!("{}/.cache", home);
+        paths.push(cache_dir);
         paths.push(".local/share/Trash".to_string());
 
-        // Extension-based skips
-        paths.push("*.o".to_string());
-        paths.push("*.a".to_string());
-        paths.push("*.so".to_string());
-        paths.push("*.dylib".to_string());
-        paths.push("*.rlib".to_string());
-        paths.push("*.rmeta".to_string());
-        paths.push("*.d".to_string());
-        paths.push("*.pyc".to_string());
-        paths.push("*.pyo".to_string());
-        paths.push("*.class".to_string());
-        paths.push("*.jar".to_string());
+        // Extension-based skips — ONLY safe build artifacts, NOT executables
+        // NOTE: .so, .a, .dylib are NOT skipped globally — they can contain malware.
+        // They are only skipped when inside known dev paths (target/, .cargo/, node_modules/).
+        paths.push("*.rlib".to_string());  // Rust intermediate (never standalone)
+        paths.push("*.rmeta".to_string()); // Rust metadata (never standalone)
+        paths.push("*.d".to_string());     // Dependency files (text)
+        paths.push("*.pyc".to_string());   // Python bytecode
+        paths.push("*.pyo".to_string());   // Python optimized bytecode
     }
 
     /// Check whether a file path should be skipped by scanners.
@@ -301,11 +299,15 @@ mod tests {
     }
 
     #[test]
-    fn object_file_extension_skipped() {
+    fn build_artifacts_in_dev_paths_skipped() {
         let al = test_allowlist();
-        assert!(al.should_skip_path(Path::new("/tmp/build/main.o")));
-        assert!(al.should_skip_path(Path::new("/tmp/lib/libcrypto.a")));
-        assert!(al.should_skip_path(Path::new("/tmp/lib/libssl.so")));
+        // .o, .a, .so are NOT globally skipped anymore — only in dev paths
+        assert!(!al.should_skip_path(Path::new("/tmp/build/main.o")));
+        assert!(!al.should_skip_path(Path::new("/tmp/lib/libcrypto.a")));
+        assert!(!al.should_skip_path(Path::new("/tmp/lib/libssl.so")));
+        // But Rust intermediates are still skipped
+        assert!(al.should_skip_path(Path::new("/tmp/build/dep.rlib")));
+        assert!(al.should_skip_path(Path::new("/tmp/build/dep.rmeta")));
     }
 
     #[test]

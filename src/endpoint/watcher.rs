@@ -131,6 +131,7 @@ impl FileWatcher {
 
                             // Check developer allowlist
                             if allowlist.should_skip_path(&path) {
+                                tracing::trace!(file = %path.display(), "Skipped by allowlist");
                                 continue;
                             }
 

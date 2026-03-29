@@ -513,6 +513,145 @@ impl HeuristicEngine {
 
         results
     }
+
+    /// Detect cryptocurrency miner indicators in file content.
+    fn check_miner_indicators(&self, data: &[u8], path: &Path) -> Vec<ScanResult> {
+        let mut results = Vec::new();
+
+        // Only check ELF binaries and scripts (not images, docs, etc.)
+        let is_elf = data.len() >= 4 && data.starts_with(b"\x7FELF");
+        let is_script = data.len() >= 2 && data.starts_with(b"#!");
+        let is_text = data.iter().take(512).all(|&b| b.is_ascii() || b == b'\n' || b == b'\r' || b == b'\t');
+
+        if !is_elf && !is_script && !is_text {
+            return results;
+        }
+
+        // Convert to string for pattern matching (safe — non-UTF8 bytes become ?)
+        let content = String::from_utf8_lossy(data);
+        let content_lower = content.to_lowercase();
+
+        // Mining pool protocol strings
+        let pool_indicators: &[(&str, &str)] = &[
+            ("stratum+tcp://", "Stratum mining pool protocol (TCP)"),
+            ("stratum+ssl://", "Stratum mining pool protocol (SSL)"),
+            ("stratum://", "Stratum mining pool protocol"),
+            ("pool.minexmr", "MinXMR mining pool"),
+            ("pool.supportxmr", "SupportXMR mining pool"),
+            ("pool.hashvault", "HashVault mining pool"),
+            ("nanopool.org", "Nanopool mining pool"),
+            ("2miners.com", "2Miners mining pool"),
+            ("nicehash.com", "NiceHash mining pool"),
+            ("minergate.com", "MinerGate mining pool"),
+            ("f2pool.com", "F2Pool mining pool"),
+            ("antpool.com", "AntPool mining pool"),
+            ("ethermine.org", "Ethermine mining pool"),
+        ];
+
+        for (pattern, desc) in pool_indicators {
+            if content_lower.contains(pattern) {
+                results.push(ScanResult::new(
+                    "heuristic_engine",
+                    path.to_string_lossy(),
+                    Severity::Critical,
+                    DetectionCategory::HeuristicAnomaly {
+                        rule: "miner_pool_protocol".to_string(),
+                    },
+                    format!("Cryptocurrency miner indicator: {} found in {}", desc, path.display()),
+                    0.95,
+                    RecommendedAction::Quarantine {
+                        source_path: path.to_path_buf(),
+                    },
+                ));
+                break; // One pool match is enough
+            }
+        }
+
+        // Mining algorithm strings
+        let algo_indicators: &[&str] = &[
+            "cryptonight", "randomx", "kawpow", "ethash", "equihash",
+            "scrypt", "blake2b", "ghostrider", "autolykos",
+        ];
+
+        let mut algo_count = 0;
+        for algo in algo_indicators {
+            if content_lower.contains(algo) {
+                algo_count += 1;
+            }
+        }
+        // Two or more algorithm names = very likely a miner
+        if algo_count >= 2 {
+            results.push(ScanResult::new(
+                "heuristic_engine",
+                path.to_string_lossy(),
+                Severity::High,
+                DetectionCategory::HeuristicAnomaly {
+                    rule: "miner_algorithm_strings".to_string(),
+                },
+                format!(
+                    "Multiple mining algorithm names ({}) found in {} — likely crypto miner",
+                    algo_count, path.display()
+                ),
+                0.85,
+                RecommendedAction::Quarantine {
+                    source_path: path.to_path_buf(),
+                },
+            ));
+        }
+
+        // Known miner binary name patterns in the filename
+        let filename = path.file_name()
+            .map(|n| n.to_string_lossy().to_lowercase())
+            .unwrap_or_default();
+        let miner_names = [
+            "xmrig", "minerd", "cpuminer", "ethminer", "nbminer",
+            "phoenixminer", "t-rex", "lolminer", "gminer",
+            "kdevtmpfsi", "kinsing", "xmr-stak",
+        ];
+        for name in &miner_names {
+            if filename.contains(name) {
+                results.push(ScanResult::new(
+                    "heuristic_engine",
+                    path.to_string_lossy(),
+                    Severity::Critical,
+                    DetectionCategory::HeuristicAnomaly {
+                        rule: "miner_filename".to_string(),
+                    },
+                    format!("Known miner filename pattern '{}' in {}", name, path.display()),
+                    0.95,
+                    RecommendedAction::Quarantine {
+                        source_path: path.to_path_buf(),
+                    },
+                ));
+                break;
+            }
+        }
+
+        // Wallet address patterns (Monero 95-char base58, Bitcoin 26-35 char)
+        if content_lower.contains("wallet") || content_lower.contains("--user") {
+            // Look for Monero-style addresses (starts with 4 and is 95 chars)
+            for word in content.split_whitespace() {
+                if word.len() == 95 && word.starts_with('4') && word.chars().all(|c| c.is_alphanumeric()) {
+                    results.push(ScanResult::new(
+                        "heuristic_engine",
+                        path.to_string_lossy(),
+                        Severity::High,
+                        DetectionCategory::HeuristicAnomaly {
+                            rule: "miner_wallet_address".to_string(),
+                        },
+                        format!("Probable Monero wallet address found in {}", path.display()),
+                        0.9,
+                        RecommendedAction::Quarantine {
+                            source_path: path.to_path_buf(),
+                        },
+                    ));
+                    break;
+                }
+            }
+        }
+
+        results
+    }
 }
 
 /// Detect file type from magic bytes.
@@ -575,6 +714,7 @@ impl Scanner for HeuristicEngine {
         results.extend(self.check_file_type_mismatch(&data, path));
         results.extend(self.check_script_obfuscation(&data, path));
         results.extend(self.check_embedded_executable(&data, path));
+        results.extend(self.check_miner_indicators(&data, path));
         results
     }
 
@@ -583,6 +723,7 @@ impl Scanner for HeuristicEngine {
         let mut results = Vec::new();
         results.extend(self.check_entropy(data, path));
         results.extend(self.check_script_obfuscation(data, path));
+        results.extend(self.check_miner_indicators(data, path));
         results
     }
 }

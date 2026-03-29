@@ -210,9 +210,9 @@ impl YaraEngine {
                 meta_description: "PHP web shell indicators — remote code execution".to_string(),
                 severity: Severity::Critical,
             },
-            // 5. Crypto miner
+            // 5. Crypto miner — pool protocols
             YaraRule {
-                name: "Crypto_Miner".to_string(),
+                name: "Crypto_Miner_Pool".to_string(),
                 tags: vec!["miner".to_string(), "crypto".to_string()],
                 strings: vec![
                     YaraString {
@@ -226,6 +226,30 @@ impl YaraEngine {
                         is_nocase: true,
                     },
                     YaraString {
+                        id: "$pool_port".to_string(),
+                        pattern: b":3333".to_vec(),
+                        is_nocase: false,
+                    },
+                    YaraString {
+                        id: "$pool_port2".to_string(),
+                        pattern: b":4444".to_vec(),
+                        is_nocase: false,
+                    },
+                    YaraString {
+                        id: "$mining_pool".to_string(),
+                        pattern: b"mining pool".to_vec(),
+                        is_nocase: true,
+                    },
+                ],
+                meta_description: "Mining pool protocol indicators".to_string(),
+                severity: Severity::Critical,
+            },
+            // 6. Crypto miner — binary indicators
+            YaraRule {
+                name: "Crypto_Miner_Binary".to_string(),
+                tags: vec!["miner".to_string(), "crypto".to_string()],
+                strings: vec![
+                    YaraString {
                         id: "$xmrig".to_string(),
                         pattern: b"xmrig".to_vec(),
                         is_nocase: true,
@@ -236,18 +260,38 @@ impl YaraEngine {
                         is_nocase: true,
                     },
                     YaraString {
-                        id: "$monero_addr".to_string(),
-                        pattern: b"4".to_vec(), // Monero addresses start with 4
-                        is_nocase: false,
+                        id: "$randomx".to_string(),
+                        pattern: b"randomx".to_vec(),
+                        is_nocase: true,
                     },
                     YaraString {
                         id: "$coinhive".to_string(),
                         pattern: b"coinhive".to_vec(),
                         is_nocase: true,
                     },
+                    YaraString {
+                        id: "$minergate".to_string(),
+                        pattern: b"minergate".to_vec(),
+                        is_nocase: true,
+                    },
+                    YaraString {
+                        id: "$cpuminer".to_string(),
+                        pattern: b"cpuminer".to_vec(),
+                        is_nocase: true,
+                    },
+                    YaraString {
+                        id: "$kdevtmpfsi".to_string(),
+                        pattern: b"kdevtmpfsi".to_vec(),
+                        is_nocase: false,
+                    },
+                    YaraString {
+                        id: "$kinsing".to_string(),
+                        pattern: b"kinsing".to_vec(),
+                        is_nocase: true,
+                    },
                 ],
-                meta_description: "Cryptocurrency miner indicators".to_string(),
-                severity: Severity::High,
+                meta_description: "Known crypto miner binary strings".to_string(),
+                severity: Severity::Critical,
             },
         ]
     }
@@ -515,7 +559,7 @@ mod tests {
         let engine = test_engine();
         let miner = b"pool: stratum+tcp://pool.minexmr.com:4444";
         let matches = engine.scan_data(miner);
-        assert!(matches.iter().any(|(name, _)| name == "Crypto_Miner"));
+        assert!(matches.iter().any(|(name, _)| name == "Crypto_Miner_Pool"));
     }
 
     #[test]
@@ -530,7 +574,7 @@ mod tests {
     #[test]
     fn rule_count() {
         let engine = test_engine();
-        assert_eq!(engine.rule_count(), 5);
+        assert_eq!(engine.rule_count(), 6); // EICAR + PowerShell + ReverseShell + WebShell + MinerPool + MinerBinary
     }
 
     #[test]
@@ -547,7 +591,7 @@ mod tests {
             meta_description: "Custom test rule".to_string(),
             severity: Severity::Low,
         });
-        assert_eq!(engine.rule_count(), 6);
+        assert_eq!(engine.rule_count(), 7); // 6 built-in + 1 custom
 
         let matches = engine.scan_data(b"This contains CUSTOM_MARKER_STRING in it");
         assert!(matches.iter().any(|(name, _)| name == "Custom_Test"));
