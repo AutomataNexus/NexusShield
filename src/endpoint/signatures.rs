@@ -82,42 +82,90 @@ impl SignatureEngine {
     /// Add built-in test and well-known malware signatures.
     fn seed_signatures(&self) {
         let seeds = vec![
-            ("275a021bbfb6489e54d471899f7db9d1663fc695ec2fe2a2c4538aabf651fd0f",
-             "EICAR-Test-File", "Test", Severity::High,
-             "EICAR standard antivirus test file"),
-            ("131f95c51cc819465fa1797f6ccacf9d494aaaff46fa3eac73ae63ffbdfd8267",
-             "EICAR-Test-File-Trailing", "Test", Severity::High,
-             "EICAR test file with trailing whitespace"),
-            ("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-             "Empty-File-Marker", "Test", Severity::Info,
-             "SHA-256 of empty file (0 bytes) — informational marker"),
-            ("a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2",
-             "Trojan.GenericKD.46542", "Trojan", Severity::Critical,
-             "Generic trojan downloader with C2 callback capability"),
-            ("b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3",
-             "Backdoor.Linux.Mirai.A", "Botnet", Severity::Critical,
-             "Mirai botnet variant targeting IoT devices"),
-            ("c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4",
-             "Ransomware.WannaCry", "Ransomware", Severity::Critical,
-             "WannaCry ransomware variant with SMB propagation"),
-            ("d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5",
-             "Rootkit.Linux.Diamorphine", "Rootkit", Severity::Critical,
-             "Diamorphine kernel rootkit for process and file hiding"),
-            ("e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6",
-             "Miner.Linux.XMRig", "Miner", Severity::High,
-             "XMRig cryptocurrency miner binary"),
-            ("f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7",
-             "Exploit.Linux.DirtyPipe", "Exploit", Severity::Critical,
-             "CVE-2022-0847 DirtyPipe privilege escalation exploit"),
-            ("a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8",
-             "Webshell.PHP.C99", "Webshell", Severity::High,
-             "C99 PHP web shell for remote server administration"),
-            ("b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9",
-             "Backdoor.Linux.Reptile", "Rootkit", Severity::Critical,
-             "Reptile LKM rootkit with hidden reverse shell"),
-            ("c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0",
-             "Trojan.Linux.Tsunami", "Trojan", Severity::High,
-             "Tsunami/Kaiten IRC botnet agent"),
+            (
+                "275a021bbfb6489e54d471899f7db9d1663fc695ec2fe2a2c4538aabf651fd0f",
+                "EICAR-Test-File",
+                "Test",
+                Severity::High,
+                "EICAR standard antivirus test file",
+            ),
+            (
+                "131f95c51cc819465fa1797f6ccacf9d494aaaff46fa3eac73ae63ffbdfd8267",
+                "EICAR-Test-File-Trailing",
+                "Test",
+                Severity::High,
+                "EICAR test file with trailing whitespace",
+            ),
+            (
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                "Empty-File-Marker",
+                "Test",
+                Severity::Info,
+                "SHA-256 of empty file (0 bytes) — informational marker",
+            ),
+            (
+                "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2",
+                "Trojan.GenericKD.46542",
+                "Trojan",
+                Severity::Critical,
+                "Generic trojan downloader with C2 callback capability",
+            ),
+            (
+                "b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3",
+                "Backdoor.Linux.Mirai.A",
+                "Botnet",
+                Severity::Critical,
+                "Mirai botnet variant targeting IoT devices",
+            ),
+            (
+                "c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4",
+                "Ransomware.WannaCry",
+                "Ransomware",
+                Severity::Critical,
+                "WannaCry ransomware variant with SMB propagation",
+            ),
+            (
+                "d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5",
+                "Rootkit.Linux.Diamorphine",
+                "Rootkit",
+                Severity::Critical,
+                "Diamorphine kernel rootkit for process and file hiding",
+            ),
+            (
+                "e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6",
+                "Miner.Linux.XMRig",
+                "Miner",
+                Severity::High,
+                "XMRig cryptocurrency miner binary",
+            ),
+            (
+                "f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7",
+                "Exploit.Linux.DirtyPipe",
+                "Exploit",
+                Severity::Critical,
+                "CVE-2022-0847 DirtyPipe privilege escalation exploit",
+            ),
+            (
+                "a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8",
+                "Webshell.PHP.C99",
+                "Webshell",
+                Severity::High,
+                "C99 PHP web shell for remote server administration",
+            ),
+            (
+                "b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9",
+                "Backdoor.Linux.Reptile",
+                "Rootkit",
+                Severity::Critical,
+                "Reptile LKM rootkit with hidden reverse shell",
+            ),
+            (
+                "c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0",
+                "Trojan.Linux.Tsunami",
+                "Trojan",
+                Severity::High,
+                "Tsunami/Kaiten IRC botnet agent",
+            ),
         ];
 
         let mut db = self.exact_db.write();
@@ -303,7 +351,9 @@ mod tests {
     use std::io::Write;
 
     fn test_engine() -> SignatureEngine {
-        SignatureEngine::new(SignatureConfig::new(PathBuf::from("/tmp/nexus-shield-test-sigs.ndjson")))
+        SignatureEngine::new(SignatureConfig::new(PathBuf::from(
+            "/tmp/nexus-shield-test-sigs.ndjson",
+        )))
     }
 
     #[test]
@@ -320,7 +370,11 @@ mod tests {
     #[test]
     fn clean_hash_passes() {
         let engine = test_engine();
-        assert!(engine.check_hash("0000000000000000000000000000000000000000000000000000000000000000").is_none());
+        assert!(
+            engine
+                .check_hash("0000000000000000000000000000000000000000000000000000000000000000")
+                .is_none()
+        );
     }
 
     #[test]
@@ -337,7 +391,11 @@ mod tests {
             },
         );
         assert_eq!(engine.signature_count(), count_before + 1);
-        assert!(engine.check_hash("deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef").is_some());
+        assert!(
+            engine
+                .check_hash("deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef")
+                .is_some()
+        );
     }
 
     #[test]
@@ -348,14 +406,20 @@ mod tests {
         let path = dir.join("hello.txt");
         std::fs::write(&path, b"hello\n").unwrap();
         let hash = SignatureEngine::compute_file_hash(&path).unwrap();
-        assert_eq!(hash, "5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03");
+        assert_eq!(
+            hash,
+            "5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03"
+        );
         let _ = std::fs::remove_file(&path);
     }
 
     #[test]
     fn compute_bytes_hash() {
         let hash = SignatureEngine::compute_bytes_hash(b"hello\n");
-        assert_eq!(hash, "5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03");
+        assert_eq!(
+            hash,
+            "5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03"
+        );
     }
 
     #[test]
@@ -365,7 +429,10 @@ mod tests {
         let path = dir.join("empty.txt");
         std::fs::write(&path, b"").unwrap();
         let hash = SignatureEngine::compute_file_hash(&path).unwrap();
-        assert_eq!(hash, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+        assert_eq!(
+            hash,
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
         let _ = std::fs::remove_file(&path);
     }
 

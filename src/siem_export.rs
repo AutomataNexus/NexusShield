@@ -20,8 +20,8 @@
 use crate::audit_chain::{AuditEvent, SecurityEventType};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 // =============================================================================
 // Configuration
@@ -35,11 +35,23 @@ pub enum SiemDestination {
     /// Syslog over TCP (host:port).
     SyslogTcp { host: String, port: u16 },
     /// Elasticsearch (base URL, index name).
-    Elasticsearch { url: String, index: String, api_key: Option<String> },
+    Elasticsearch {
+        url: String,
+        index: String,
+        api_key: Option<String>,
+    },
     /// Splunk HTTP Event Collector.
-    SplunkHec { url: String, token: String, index: Option<String>, source: Option<String> },
+    SplunkHec {
+        url: String,
+        token: String,
+        index: Option<String>,
+        source: Option<String>,
+    },
     /// Generic webhook (POST JSON).
-    Webhook { url: String, headers: Vec<(String, String)> },
+    Webhook {
+        url: String,
+        headers: Vec<(String, String)>,
+    },
 }
 
 /// Configuration for SIEM export.
@@ -80,6 +92,35 @@ impl Default for SiemConfig {
 // Event Formatting
 // =============================================================================
 
+/// Map a SecurityEventType to a CEF device event class ID (DVCCS).
+/// These IDs follow the Micro Focus ArcSight CEF taxonomy.
+fn security_event_cef_class(event_type: &SecurityEventType) -> u32 {
+    match event_type {
+        SecurityEventType::SqlInjectionAttempt => 10010,
+        SecurityEventType::SsrfAttempt => 10011,
+        SecurityEventType::PathTraversalAttempt => 10012,
+        SecurityEventType::MaliciousPayload => 10013,
+        SecurityEventType::DataQuarantined => 10020,
+        SecurityEventType::FileQuarantined => 10021,
+        SecurityEventType::FileRestored => 10022,
+        SecurityEventType::RateLimitHit => 10030,
+        SecurityEventType::RequestBlocked => 10031,
+        SecurityEventType::BanIssued => 10032,
+        SecurityEventType::BanLifted => 10033,
+        SecurityEventType::RequestAllowed => 10040,
+        SecurityEventType::AuthFailure => 10050,
+        SecurityEventType::MalwareDetected => 10060,
+        SecurityEventType::SuspiciousProcess => 10061,
+        SecurityEventType::SuspiciousNetwork => 10062,
+        SecurityEventType::MemoryAnomaly => 10063,
+        SecurityEventType::RootkitIndicator => 10064,
+        SecurityEventType::ChainVerified => 10070,
+        SecurityEventType::SignatureDbUpdated => 10080,
+        SecurityEventType::EndpointScanStarted => 10081,
+        SecurityEventType::EndpointScanCompleted => 10082,
+    }
+}
+
 /// Structured event payload for SIEM ingestion.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SiemEvent {
@@ -89,6 +130,8 @@ pub struct SiemEvent {
     pub source: String,
     /// Event category.
     pub event_type: String,
+    /// CEF device event class ID — maps SecurityEventType to taxonomy integer.
+    pub cef_class_id: u32,
     /// Severity label (info, low, medium, high, critical).
     pub severity: String,
     /// CEF-compatible severity integer (0-10).
@@ -118,6 +161,7 @@ impl SiemEvent {
             timestamp: event.timestamp.to_rfc3339(),
             source: source_name.to_string(),
             event_type: format!("{:?}", event.event_type),
+            cef_class_id: security_event_cef_class(&event.event_type),
             severity,
             severity_id,
             source_ip: event.source_ip.clone(),
@@ -205,7 +249,7 @@ fn syslog_severity(cef: u8) -> u8 {
         5..=6 => 3,  // error
         3..=4 => 4,  // warning
         1..=2 => 5,  // notice
-        _ => 6,       // informational
+        _ => 6,      // informational
     }
 }
 
@@ -307,12 +351,20 @@ impl SiemExporter {
                 SiemDestination::SyslogTcp { host, port } => {
                     self.send_syslog_tcp(event, host, *port).await
                 }
-                SiemDestination::Elasticsearch { url, index, api_key } => {
-                    self.send_elasticsearch(event, url, index, api_key.as_deref()).await
+                SiemDestination::Elasticsearch {
+                    url,
+                    index,
+                    api_key,
+                } => {
+                    self.send_elasticsearch(event, url, index, api_key.as_deref())
+                        .await
                 }
-                SiemDestination::SplunkHec { url, token, index, source } => {
-                    self.send_splunk_hec(event, url, token, index, source).await
-                }
+                SiemDestination::SplunkHec {
+                    url,
+                    token,
+                    index,
+                    source,
+                } => self.send_splunk_hec(event, url, token, index, source).await,
                 SiemDestination::Webhook { url, headers } => {
                     self.send_webhook(event, url, headers).await
                 }
@@ -508,7 +560,9 @@ impl SimpleHttpRequestBuilder {
         let client = Client::builder(TokioExecutor::new()).build_http::<axum::body::Body>();
 
         let body_bytes = self.body.unwrap_or_default();
-        let mut builder = hyper::Request::builder().method(self.method.as_str()).uri(uri);
+        let mut builder = hyper::Request::builder()
+            .method(self.method.as_str())
+            .uri(uri);
 
         for (k, v) in &self.headers {
             builder = builder.header(k.as_str(), v.as_str());
@@ -706,11 +760,11 @@ mod tests {
     #[test]
     fn syslog_severity_mapping() {
         assert_eq!(syslog_severity(10), 1); // critical -> alert
-        assert_eq!(syslog_severity(7), 2);  // high -> critical
-        assert_eq!(syslog_severity(5), 3);  // medium -> error
-        assert_eq!(syslog_severity(3), 4);  // low -> warning
-        assert_eq!(syslog_severity(1), 5);  // info -> notice
-        assert_eq!(syslog_severity(0), 6);  // none -> info
+        assert_eq!(syslog_severity(7), 2); // high -> critical
+        assert_eq!(syslog_severity(5), 3); // medium -> error
+        assert_eq!(syslog_severity(3), 4); // low -> warning
+        assert_eq!(syslog_severity(1), 5); // info -> notice
+        assert_eq!(syslog_severity(0), 6); // none -> info
     }
 
     #[test]

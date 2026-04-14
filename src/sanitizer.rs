@@ -92,9 +92,18 @@ pub fn validate_file_path(path: &str) -> Result<(), String> {
 
     // Block access to sensitive system directories
     let blocked_prefixes = [
-        "/etc/", "/proc/", "/sys/", "/dev/", "/root/", "/boot/",
-        "/var/run/", "/var/log/", "/tmp/.", "/home/",
-        "C:\\Windows\\", "C:\\Users\\",
+        "/etc/",
+        "/proc/",
+        "/sys/",
+        "/dev/",
+        "/root/",
+        "/boot/",
+        "/var/run/",
+        "/var/log/",
+        "/tmp/.",
+        "/home/",
+        "C:\\Windows\\",
+        "C:\\Users\\",
     ];
     let normalized = path.replace('\\', "/").to_lowercase();
     for prefix in &blocked_prefixes {
@@ -105,9 +114,20 @@ pub fn validate_file_path(path: &str) -> Result<(), String> {
 
     // Block access to sensitive files by name
     let blocked_names = [
-        "passwd", "shadow", "id_rsa", "id_ed25519", "authorized_keys",
-        ".ssh", ".env", ".git", "credentials", "secret", ".bash_history",
-        ".pgpass", ".my.cnf", "wp-config.php",
+        "passwd",
+        "shadow",
+        "id_rsa",
+        "id_ed25519",
+        "authorized_keys",
+        ".ssh",
+        ".env",
+        ".git",
+        "credentials",
+        "secret",
+        ".bash_history",
+        ".pgpass",
+        ".my.cnf",
+        "wp-config.php",
     ];
     let lower_path = path.to_lowercase();
     for name in &blocked_names {
@@ -157,10 +177,16 @@ fn redact_paths(s: &str) -> String {
 
     while i < bytes.len() {
         // Detect Unix paths
-        if bytes[i] == b'/' && i + 1 < bytes.len() && (bytes[i + 1].is_ascii_alphanumeric() || bytes[i + 1] == b'.') {
+        if bytes[i] == b'/'
+            && i + 1 < bytes.len()
+            && (bytes[i + 1].is_ascii_alphanumeric() || bytes[i + 1] == b'.')
+        {
             // Check if this looks like a file path (has directory separators)
             let path_end = find_path_end(s, i);
-            if path_end > i + 3 && s[i..path_end].contains('/') && s[i..path_end].matches('/').count() >= 2 {
+            if path_end > i + 3
+                && s[i..path_end].contains('/')
+                && s[i..path_end].matches('/').count() >= 2
+            {
                 result.push_str("[path redacted]");
                 i = path_end;
                 continue;
@@ -188,13 +214,17 @@ fn redact_internal_ips(s: &str) -> String {
     let mut result = s.to_string();
     // Redact 10.x.x.x, 172.16-31.x.x, 192.168.x.x patterns
     // Simple approach: scan for IP-like patterns
-    for prefix in &["10.", "172.16.", "172.17.", "172.18.", "172.19.",
-                     "172.20.", "172.21.", "172.22.", "172.23.", "172.24.",
-                     "172.25.", "172.26.", "172.27.", "172.28.", "172.29.",
-                     "172.30.", "172.31.", "192.168."] {
+    for prefix in &[
+        "10.", "172.16.", "172.17.", "172.18.", "172.19.", "172.20.", "172.21.", "172.22.",
+        "172.23.", "172.24.", "172.25.", "172.26.", "172.27.", "172.28.", "172.29.", "172.30.",
+        "172.31.", "192.168.",
+    ] {
         while let Some(pos) = result.find(prefix) {
             // Find the end of the IP address
-            let ip_end = result[pos..].find(|c: char| !c.is_ascii_digit() && c != '.').map(|i| pos + i).unwrap_or(result.len());
+            let ip_end = result[pos..]
+                .find(|c: char| !c.is_ascii_digit() && c != '.')
+                .map(|i| pos + i)
+                .unwrap_or(result.len());
             let ip_candidate = &result[pos..ip_end];
             // Basic validation: should have at least 3 dots
             if ip_candidate.matches('.').count() >= 3 {
@@ -282,12 +312,21 @@ mod tests {
     fn sanitizes_error_messages() {
         let raw = "Failed to connect to /opt/internal/db at 192.168.1.50:5432";
         let sanitized = sanitize_error_message(raw);
-        assert!(!sanitized.contains("/opt/internal/db"), "Path should be redacted");
-        assert!(!sanitized.contains("192.168.1.50"), "Internal IP should be redacted");
+        assert!(
+            !sanitized.contains("/opt/internal/db"),
+            "Path should be redacted"
+        );
+        assert!(
+            !sanitized.contains("192.168.1.50"),
+            "Internal IP should be redacted"
+        );
     }
 
     #[test]
     fn strips_header_injection() {
-        assert_eq!(sanitize_header_value("value\r\nX-Injected: true"), "valueX-Injected: true");
+        assert_eq!(
+            sanitize_header_value("value\r\nX-Injected: true"),
+            "valueX-Injected: true"
+        );
     }
 }

@@ -61,34 +61,84 @@ impl Default for SupplyChainConfig {
                 "faker-malicious".to_string(),
                 // Known malicious PyPI
                 "python3-dateutil".to_string(), // typosquat of python-dateutil
-                "jeIlyfish".to_string(),         // homoglyph of jellyfish
+                "jeIlyfish".to_string(),        // homoglyph of jellyfish
                 "python-binance-sdk".to_string(),
                 // Known malicious crates
                 "rustdecimal".to_string(), // typosquat of rust_decimal
             ],
             popular_rust_crates: vec![
-                "serde".into(), "tokio".into(), "reqwest".into(), "clap".into(),
-                "rand".into(), "hyper".into(), "axum".into(), "tracing".into(),
-                "anyhow".into(), "thiserror".into(), "chrono".into(), "uuid".into(),
-                "regex".into(), "sha2".into(), "base64".into(), "log".into(),
-                "futures".into(), "bytes".into(), "syn".into(), "quote".into(),
-                "proc-macro2".into(), "libc".into(), "lazy_static".into(),
-                "once_cell".into(), "parking_lot".into(), "crossbeam".into(),
+                "serde".into(),
+                "tokio".into(),
+                "reqwest".into(),
+                "clap".into(),
+                "rand".into(),
+                "hyper".into(),
+                "axum".into(),
+                "tracing".into(),
+                "anyhow".into(),
+                "thiserror".into(),
+                "chrono".into(),
+                "uuid".into(),
+                "regex".into(),
+                "sha2".into(),
+                "base64".into(),
+                "log".into(),
+                "futures".into(),
+                "bytes".into(),
+                "syn".into(),
+                "quote".into(),
+                "proc-macro2".into(),
+                "libc".into(),
+                "lazy_static".into(),
+                "once_cell".into(),
+                "parking_lot".into(),
+                "crossbeam".into(),
             ],
             popular_npm_packages: vec![
-                "express".into(), "react".into(), "lodash".into(), "axios".into(),
-                "moment".into(), "chalk".into(), "commander".into(), "debug".into(),
-                "webpack".into(), "typescript".into(), "eslint".into(), "jest".into(),
-                "next".into(), "vue".into(), "angular".into(), "jquery".into(),
-                "underscore".into(), "async".into(), "request".into(), "glob".into(),
-                "minimist".into(), "dotenv".into(), "uuid".into(), "cors".into(),
+                "express".into(),
+                "react".into(),
+                "lodash".into(),
+                "axios".into(),
+                "moment".into(),
+                "chalk".into(),
+                "commander".into(),
+                "debug".into(),
+                "webpack".into(),
+                "typescript".into(),
+                "eslint".into(),
+                "jest".into(),
+                "next".into(),
+                "vue".into(),
+                "angular".into(),
+                "jquery".into(),
+                "underscore".into(),
+                "async".into(),
+                "request".into(),
+                "glob".into(),
+                "minimist".into(),
+                "dotenv".into(),
+                "uuid".into(),
+                "cors".into(),
             ],
             popular_pypi_packages: vec![
-                "requests".into(), "numpy".into(), "pandas".into(), "flask".into(),
-                "django".into(), "pytest".into(), "boto3".into(), "pillow".into(),
-                "setuptools".into(), "pyyaml".into(), "cryptography".into(),
-                "sqlalchemy".into(), "celery".into(), "redis".into(), "scipy".into(),
-                "matplotlib".into(), "beautifulsoup4".into(), "scrapy".into(),
+                "requests".into(),
+                "numpy".into(),
+                "pandas".into(),
+                "flask".into(),
+                "django".into(),
+                "pytest".into(),
+                "boto3".into(),
+                "pillow".into(),
+                "setuptools".into(),
+                "pyyaml".into(),
+                "cryptography".into(),
+                "sqlalchemy".into(),
+                "celery".into(),
+                "redis".into(),
+                "scipy".into(),
+                "matplotlib".into(),
+                "beautifulsoup4".into(),
+                "scrapy".into(),
             ],
         }
     }
@@ -217,7 +267,10 @@ pub fn parse_package_lock_json(content: &str) -> Vec<ParsedDep> {
                     name: name.to_string(),
                     version,
                     source: "npm".to_string(),
-                    registry: val.get("resolved").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                    registry: val
+                        .get("resolved")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string()),
                 });
             }
         }
@@ -236,7 +289,10 @@ pub fn parse_package_lock_json(content: &str) -> Vec<ParsedDep> {
                     name: name.clone(),
                     version,
                     source: "npm".to_string(),
-                    registry: val.get("resolved").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                    registry: val
+                        .get("resolved")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string()),
                 });
             }
         }
@@ -345,10 +401,12 @@ pub fn levenshtein(a: &str, b: &str) -> usize {
     for i in 1..=a_len {
         curr[0] = i;
         for j in 1..=b_len {
-            let cost = if a_bytes[i - 1] == b_bytes[j - 1] { 0 } else { 1 };
-            curr[j] = (prev[j] + 1)
-                .min(curr[j - 1] + 1)
-                .min(prev[j - 1] + cost);
+            let cost = if a_bytes[i - 1] == b_bytes[j - 1] {
+                0
+            } else {
+                1
+            };
+            curr[j] = (prev[j] + 1).min(curr[j - 1] + 1).min(prev[j - 1] + cost);
         }
         std::mem::swap(&mut prev, &mut curr);
     }
@@ -417,7 +475,12 @@ impl SupplyChainScanner {
     }
 
     /// Analyze a list of dependencies for risks.
-    fn analyze_deps(&self, deps: &[ParsedDep], ecosystem: Ecosystem, source: &str) -> Vec<ScanResult> {
+    fn analyze_deps(
+        &self,
+        deps: &[ParsedDep],
+        ecosystem: Ecosystem,
+        source: &str,
+    ) -> Vec<ScanResult> {
         let mut results = Vec::new();
 
         for dep in deps {
@@ -666,7 +729,10 @@ golang.org/x/crypto v0.21.0 h1:ghi789=
             registry: None,
         }];
         let results = scanner.analyze_deps(&deps, Ecosystem::Rust, "Cargo.lock");
-        let critical: Vec<_> = results.iter().filter(|r| r.severity == Severity::Critical).collect();
+        let critical: Vec<_> = results
+            .iter()
+            .filter(|r| r.severity == Severity::Critical)
+            .collect();
         assert!(!critical.is_empty(), "Should detect known-malicious crate");
         assert!(critical[0].description.contains("KNOWN MALICIOUS"));
     }
@@ -682,7 +748,8 @@ golang.org/x/crypto v0.21.0 h1:ghi789=
             registry: None,
         }];
         let results = scanner.analyze_deps(&deps, Ecosystem::Rust, "Cargo.lock");
-        let typos: Vec<_> = results.iter()
+        let typos: Vec<_> = results
+            .iter()
             .filter(|r| r.description.contains("typosquat"))
             .collect();
         assert!(!typos.is_empty(), "Should detect typosquat of 'serde'");
@@ -698,7 +765,8 @@ golang.org/x/crypto v0.21.0 h1:ghi789=
             registry: None,
         }];
         let results = scanner.analyze_deps(&deps, Ecosystem::Rust, "Cargo.lock");
-        let typos: Vec<_> = results.iter()
+        let typos: Vec<_> = results
+            .iter()
             .filter(|r| r.description.contains("typosquat"))
             .collect();
         assert!(typos.is_empty(), "Should not flag exact match as typosquat");
@@ -714,7 +782,8 @@ golang.org/x/crypto v0.21.0 h1:ghi789=
             registry: None,
         }];
         let results = scanner.analyze_deps(&deps, Ecosystem::Npm, "package-lock.json");
-        let version_alerts: Vec<_> = results.iter()
+        let version_alerts: Vec<_> = results
+            .iter()
             .filter(|r| r.description.contains("Suspicious version"))
             .collect();
         assert!(!version_alerts.is_empty());
@@ -730,7 +799,8 @@ golang.org/x/crypto v0.21.0 h1:ghi789=
             registry: Some("https://evil-registry.com/internal-pkg".to_string()),
         }];
         let results = scanner.analyze_deps(&deps, Ecosystem::Npm, "package-lock.json");
-        let registry_alerts: Vec<_> = results.iter()
+        let registry_alerts: Vec<_> = results
+            .iter()
             .filter(|r| r.description.contains("non-standard registry"))
             .collect();
         assert!(!registry_alerts.is_empty());
@@ -746,7 +816,8 @@ golang.org/x/crypto v0.21.0 h1:ghi789=
             registry: Some("https://registry.npmjs.org/express/-/express-4.18.2.tgz".to_string()),
         }];
         let results = scanner.analyze_deps(&deps, Ecosystem::Npm, "package-lock.json");
-        let registry_alerts: Vec<_> = results.iter()
+        let registry_alerts: Vec<_> = results
+            .iter()
             .filter(|r| r.description.contains("non-standard registry"))
             .collect();
         assert!(registry_alerts.is_empty());
@@ -754,19 +825,44 @@ golang.org/x/crypto v0.21.0 h1:ghi789=
 
     #[test]
     fn detect_ecosystem_from_path() {
-        assert_eq!(SupplyChainScanner::detect_ecosystem(Path::new("Cargo.lock")), Some(Ecosystem::Rust));
-        assert_eq!(SupplyChainScanner::detect_ecosystem(Path::new("package-lock.json")), Some(Ecosystem::Npm));
-        assert_eq!(SupplyChainScanner::detect_ecosystem(Path::new("requirements.txt")), Some(Ecosystem::Python));
-        assert_eq!(SupplyChainScanner::detect_ecosystem(Path::new("go.sum")), Some(Ecosystem::Go));
-        assert_eq!(SupplyChainScanner::detect_ecosystem(Path::new("random.txt")), None);
+        assert_eq!(
+            SupplyChainScanner::detect_ecosystem(Path::new("Cargo.lock")),
+            Some(Ecosystem::Rust)
+        );
+        assert_eq!(
+            SupplyChainScanner::detect_ecosystem(Path::new("package-lock.json")),
+            Some(Ecosystem::Npm)
+        );
+        assert_eq!(
+            SupplyChainScanner::detect_ecosystem(Path::new("requirements.txt")),
+            Some(Ecosystem::Python)
+        );
+        assert_eq!(
+            SupplyChainScanner::detect_ecosystem(Path::new("go.sum")),
+            Some(Ecosystem::Go)
+        );
+        assert_eq!(
+            SupplyChainScanner::detect_ecosystem(Path::new("random.txt")),
+            None
+        );
     }
 
     #[test]
     fn clean_deps_no_alerts() {
         let scanner = test_scanner();
         let deps = vec![
-            ParsedDep { name: "serde".into(), version: "1.0.200".into(), source: "crates.io".into(), registry: None },
-            ParsedDep { name: "tokio".into(), version: "1.37.0".into(), source: "crates.io".into(), registry: None },
+            ParsedDep {
+                name: "serde".into(),
+                version: "1.0.200".into(),
+                source: "crates.io".into(),
+                registry: None,
+            },
+            ParsedDep {
+                name: "tokio".into(),
+                version: "1.37.0".into(),
+                source: "crates.io".into(),
+                registry: None,
+            },
         ];
         let results = scanner.analyze_deps(&deps, Ecosystem::Rust, "Cargo.lock");
         assert!(results.is_empty(), "Clean deps should have no alerts");
@@ -783,7 +879,8 @@ golang.org/x/crypto v0.21.0 h1:ghi789=
             registry: None,
         }];
         let results = scanner.analyze_deps(&deps, Ecosystem::Npm, "package-lock.json");
-        let typos: Vec<_> = results.iter()
+        let typos: Vec<_> = results
+            .iter()
             .filter(|r| r.description.contains("typosquat"))
             .collect();
         assert!(!typos.is_empty());
@@ -800,7 +897,8 @@ golang.org/x/crypto v0.21.0 h1:ghi789=
             registry: None,
         }];
         let results = scanner.analyze_deps(&deps, Ecosystem::Python, "requirements.txt");
-        let typos: Vec<_> = results.iter()
+        let typos: Vec<_> = results
+            .iter()
             .filter(|r| r.description.contains("typosquat"))
             .collect();
         assert!(!typos.is_empty());

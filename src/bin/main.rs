@@ -8,25 +8,25 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::{
-    Router,
-    Extension,
+    Extension, Router,
     extract::Request,
-    middleware,
-    response::{IntoResponse, Response, Html},
     http::StatusCode,
+    middleware,
+    response::{Html, IntoResponse, Response},
     routing::get,
 };
 use clap::Parser;
+use http_body_util::BodyExt;
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::TokioExecutor;
-use http_body_util::BodyExt;
 use tokio::net::TcpListener;
 use tracing_subscriber::{EnvFilter, fmt};
 
 use nexus_shield::{
-    Shield, ShieldConfig, shield_middleware,
+    Shield, ShieldConfig,
     audit_chain::SecurityEventType,
     endpoint::{EndpointConfig, EndpointEngine},
+    shield_middleware,
 };
 
 #[derive(Parser, Debug)]
@@ -122,24 +122,52 @@ async fn main() {
     };
 
     // CLI args override config file values
-    if args.block_threshold != 0.7 { config.block_threshold = args.block_threshold; }
-    if args.warn_threshold != 0.4 { config.warn_threshold = args.warn_threshold; }
-    if args.rps != 50.0 { config.rate.requests_per_second = args.rps; }
+    if args.block_threshold != 0.7 {
+        config.block_threshold = args.block_threshold;
+    }
+    if args.warn_threshold != 0.4 {
+        config.warn_threshold = args.warn_threshold;
+    }
+    if args.rps != 50.0 {
+        config.rate.requests_per_second = args.rps;
+    }
 
     let mut shield = Shield::new(config);
 
     // Initialize endpoint protection if requested
-    let endpoint_engine: Option<Arc<EndpointEngine>> = if args.endpoint
-        || args.scan.is_some()
-        || args.scan_file.is_some()
-    {
-        let ep_config = EndpointConfig::default();
-        let engine = Arc::new(EndpointEngine::new(ep_config));
-        shield.endpoint = Some(engine.clone());
-        Some(engine)
-    } else {
-        None
-    };
+    let endpoint_engine: Option<Arc<EndpointEngine>> =
+        if args.endpoint || args.scan.is_some() || args.scan_file.is_some() {
+            let ep_config = EndpointConfig::default();
+            let engine = Arc::new(EndpointEngine::new(ep_config));
+
+            // Seed the runtime allowlist from persisted config.toml entries.
+            // These are the CIDRs + processes previously accepted via the
+            // ticker's shield-agent flow; they survive shield restarts.
+            for c in &shield.config.runtime_allowlist_cidrs {
+                engine.runtime_allowlist.add_cidr(c);
+            }
+            for p in &shield.config.runtime_allowlist_processes {
+                engine.runtime_allowlist.add_process(p);
+            }
+            if !shield.config.runtime_allowlist_cidrs.is_empty()
+                || !shield.config.runtime_allowlist_processes.is_empty()
+            {
+                tracing::info!(
+                    cidrs = shield.config.runtime_allowlist_cidrs.len(),
+                    processes = shield.config.runtime_allowlist_processes.len(),
+                    "runtime allowlist seeded from config.toml"
+                );
+            }
+
+            shield.endpoint = Some(engine.clone());
+            Some(engine)
+        } else {
+            None
+        };
+
+    // Config file path, captured into the allowlist POST handlers so they
+    // can persist accepted entries back to disk.
+    let config_path_for_handlers = std::sync::Arc::new(args.config.clone());
 
     // Handle one-shot scan commands
     if let Some(ref file_path) = args.scan_file {
@@ -168,19 +196,52 @@ async fn main() {
         let engine = endpoint_engine.as_ref().expect("Endpoint engine required");
         let path = std::path::Path::new(dir_path);
         tracing::info!("Scanning directory: {}", path.display());
-        let results = engine.scan_dir(path).await;
-        if results.is_empty() {
-            println!("CLEAN: No threats detected in {}", path.display());
-        } else {
-            println!("THREATS FOUND ({} detections):", results.len());
-            for r in &results {
-                println!(
-                    "  [{:?}] {} — {} ({})",
-                    r.severity, r.target, r.description, r.scanner
-                );
+
+        // Stream detections to a JSONL file instead of accumulating in memory.
+        // Keeps RSS bounded on small hosts regardless of detection count.
+        let scan_dir = std::path::Path::new("/var/lib/nexus-shield/scans");
+        let _ = std::fs::create_dir_all(scan_dir);
+        let ts = chrono::Utc::now().format("%Y%m%dT%H%M%SZ");
+        let out_path = scan_dir.join(format!("scan-{ts}.jsonl"));
+        let latest_link = scan_dir.join("latest.jsonl");
+
+        let summary = match engine.scan_dir_streaming(path, &out_path).await {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("Scan failed: {e}");
+                std::process::exit(2);
             }
+        };
+
+        // Update latest.jsonl symlink
+        let _ = std::fs::remove_file(&latest_link);
+        let _ = std::os::unix::fs::symlink(&out_path, &latest_link);
+
+        if summary.deadline_hit {
+            println!(
+                "PARTIAL: scan hit 30-minute deadline. {} files scanned, {} detections written to {}",
+                summary.files_scanned,
+                summary.detections,
+                out_path.display()
+            );
+        } else if summary.detections == 0 {
+            println!(
+                "CLEAN: No threats detected in {} ({} files scanned)",
+                path.display(),
+                summary.files_scanned
+            );
+        } else {
+            println!(
+                "THREATS FOUND: {} detections across {} files. Details: {}",
+                summary.detections,
+                summary.files_scanned,
+                out_path.display()
+            );
         }
-        std::process::exit(if results.is_empty() { 0 } else { 1 });
+        // Exit 0 on successful scan completion regardless of detections — the JSONL
+        // file is the source of truth. This prevents systemd from marking timer-driven
+        // scans as "failed" when threats are found.
+        std::process::exit(0);
     }
 
     let shield = Arc::new(shield);
@@ -193,7 +254,9 @@ async fn main() {
         let mut interval = tokio::time::interval(Duration::from_secs(60));
         loop {
             interval.tick().await;
-            shield_bg.rate_governor.prune_stale(Duration::from_secs(600));
+            shield_bg
+                .rate_governor
+                .prune_stale(Duration::from_secs(600));
             shield_bg.fingerprinter.prune_stale(600);
             shield_bg.email_limiter.prune();
             tracing::debug!("Pruned stale security state");
@@ -221,8 +284,10 @@ async fn main() {
                         if !webhook_configs.is_empty() {
                             nexus_shield::webhook::fire_webhooks(event, &webhook_configs).await;
                         }
-                        nexus_shield::ferrum_integration::maybe_send_alert(event, &ferrum_config).await;
-                        nexus_shield::nexuspulse_integration::maybe_send_sms(event, &pulse_config).await;
+                        nexus_shield::ferrum_integration::maybe_send_alert(event, &ferrum_config)
+                            .await;
+                        nexus_shield::nexuspulse_integration::maybe_send_sms(event, &pulse_config)
+                            .await;
                     }
                     last_count = current_count;
                 }
@@ -232,13 +297,11 @@ async fn main() {
 
     // Start signature auto-updater if configured
     if let Some(ref sig_config) = shield.config.signature_update {
-        let sig_path = std::path::PathBuf::from(
-            std::env::var("HOME").unwrap_or("/tmp".to_string())
-        ).join(".nexus-shield/signatures.ndjson");
-        let (_sig_handle, _sig_shutdown) = nexus_shield::signature_updater::start_updater(
-            sig_config.clone(),
-            sig_path,
-        );
+        let sig_path =
+            std::path::PathBuf::from(std::env::var("HOME").unwrap_or("/tmp".to_string()))
+                .join(".nexus-shield/signatures.ndjson");
+        let (_sig_handle, _sig_shutdown) =
+            nexus_shield::signature_updater::start_updater(sig_config.clone(), std::sync::Arc::new(sig_path));
         tracing::info!("Signature auto-updater enabled");
     }
 
@@ -246,10 +309,7 @@ async fn main() {
     if let Some(ref engine) = endpoint_engine {
         if args.endpoint {
             let handles = engine.start(shield.audit.clone()).await;
-            tracing::info!(
-                monitors = handles.len(),
-                "Endpoint protection started"
-            );
+            tracing::info!(monitors = handles.len(), "Endpoint protection started");
         }
     }
 
@@ -269,24 +329,68 @@ async fn main() {
         let ep2 = engine.clone();
         let ep3 = engine.clone();
         let ep4 = engine.clone();
+        let ep5 = engine.clone();
+        let ep6 = engine.clone();
+        let ep7 = engine.clone();
         Some(
             Router::new()
-                .route("/endpoint/status", get(move || {
-                    let e = ep1.clone();
-                    async move { endpoint_status_handler(e).await }
-                }))
-                .route("/endpoint/detections", get(move || {
-                    let e = ep2.clone();
-                    async move { endpoint_detections_handler(e).await }
-                }))
-                .route("/endpoint/quarantine", get(move || {
-                    let e = ep3.clone();
-                    async move { endpoint_quarantine_handler(e).await }
-                }))
-                .route("/endpoint/scan", axum::routing::post(move |body: String| {
-                    let e = ep4.clone();
-                    async move { endpoint_scan_handler(e, body).await }
-                }))
+                .route(
+                    "/endpoint/status",
+                    get(move || {
+                        let e = ep1.clone();
+                        async move { endpoint_status_handler(e).await }
+                    }),
+                )
+                .route(
+                    "/endpoint/detections",
+                    get(move || {
+                        let e = ep2.clone();
+                        async move { endpoint_detections_handler(e).await }
+                    }),
+                )
+                .route(
+                    "/endpoint/quarantine",
+                    get(move || {
+                        let e = ep3.clone();
+                        async move { endpoint_quarantine_handler(e).await }
+                    }),
+                )
+                .route(
+                    "/endpoint/scan",
+                    axum::routing::post(move |body: String| {
+                        let e = ep4.clone();
+                        async move { endpoint_scan_handler(e, body).await }
+                    }),
+                )
+                .route(
+                    "/endpoint/allowlist",
+                    get(move || {
+                        let e = ep5.clone();
+                        async move { endpoint_allowlist_get_handler(e).await }
+                    }),
+                )
+                .route(
+                    "/endpoint/allowlist/cidr",
+                    axum::routing::post({
+                        let cfg = config_path_for_handlers.clone();
+                        move |body: String| {
+                            let e = ep6.clone();
+                            let c = cfg.clone();
+                            async move { endpoint_allowlist_cidr_handler(e, c, body).await }
+                        }
+                    }),
+                )
+                .route(
+                    "/endpoint/allowlist/process",
+                    axum::routing::post({
+                        let cfg = config_path_for_handlers.clone();
+                        move |body: String| {
+                            let e = ep7.clone();
+                            let c = cfg.clone();
+                            async move { endpoint_allowlist_process_handler(e, c, body).await }
+                        }
+                    }),
+                ),
         )
     } else {
         None
@@ -299,67 +403,100 @@ async fn main() {
             .route("/health", get(|| async { "NexusShield OK" }))
             .route("/dashboard", get(dashboard_handler))
             .route("/logo.png", get(logo_handler))
-            .route("/status", get(move || async move {
-                status_handler(shield_status.clone()).await
-            }))
-            .route("/audit", get(move || async move {
-                audit_handler(shield_audit.clone()).await
-            }))
-            .route("/stats", get(move || async move {
-                stats_handler(shield_stats.clone()).await
-            }))
-            .route("/events", get(move || {
-                let audit = shield_events.audit.clone();
-                async move {
-                    nexus_shield::sse_events::audit_event_stream(audit, 500)
-                }
-            }))
-            .route("/report", get(move || {
-                let s = shield_report.clone();
-                async move {
-                    let config = nexus_shield::compliance_report::ReportConfig::default();
-                    let modules = vec![
-                        "sql_firewall".into(), "ssrf_guard".into(), "rate_governor".into(),
-                        "fingerprint".into(), "quarantine".into(), "email_guard".into(),
-                        "credential_vault".into(), "audit_chain".into(), "sanitizer".into(),
-                        "threat_score".into(), "siem_export".into(), "journal".into(),
-                        "sse_events".into(), "compliance_report".into(),
-                        "signatures".into(), "heuristics".into(), "yara_engine".into(),
-                        "watcher".into(), "process_monitor".into(), "network_monitor".into(),
-                        "dns_filter".into(), "usb_monitor".into(), "fim".into(),
-                        "container_scanner".into(), "supply_chain".into(),
-                    ];
-                    let shield_cfg = serde_json::json!({
-                        "block_threshold": s.config.block_threshold,
-                        "warn_threshold": s.config.warn_threshold,
-                        "rate_rps": s.config.rate.requests_per_second,
-                    });
-                    let html = nexus_shield::compliance_report::generate_html_report(
-                        &s.audit, &config, &modules, &shield_cfg,
-                    );
-                    Html(html)
-                }
-            }));
+            .route(
+                "/status",
+                get(move || async move { status_handler(shield_status.clone()).await }),
+            )
+            .route(
+                "/audit",
+                get(move || async move { audit_handler(shield_audit.clone()).await }),
+            )
+            .route(
+                "/stats",
+                get(move || async move { stats_handler(shield_stats.clone()).await }),
+            )
+            .route(
+                "/events",
+                get(move || {
+                    let audit = shield_events.audit.clone();
+                    async move { nexus_shield::sse_events::audit_event_stream(audit, 500) }
+                }),
+            )
+            .route(
+                "/report",
+                get(move || {
+                    let s = shield_report.clone();
+                    async move {
+                        let config = nexus_shield::compliance_report::ReportConfig::default();
+                        let modules = vec![
+                            "sql_firewall".into(),
+                            "ssrf_guard".into(),
+                            "rate_governor".into(),
+                            "fingerprint".into(),
+                            "quarantine".into(),
+                            "email_guard".into(),
+                            "credential_vault".into(),
+                            "audit_chain".into(),
+                            "sanitizer".into(),
+                            "threat_score".into(),
+                            "siem_export".into(),
+                            "journal".into(),
+                            "sse_events".into(),
+                            "compliance_report".into(),
+                            "signatures".into(),
+                            "heuristics".into(),
+                            "yara_engine".into(),
+                            "watcher".into(),
+                            "process_monitor".into(),
+                            "network_monitor".into(),
+                            "dns_filter".into(),
+                            "usb_monitor".into(),
+                            "fim".into(),
+                            "container_scanner".into(),
+                            "supply_chain".into(),
+                        ];
+                        let shield_cfg = serde_json::json!({
+                            "block_threshold": s.config.block_threshold,
+                            "warn_threshold": s.config.warn_threshold,
+                            "rate_rps": s.config.rate.requests_per_second,
+                        });
+                        let html = nexus_shield::compliance_report::generate_html_report(
+                            &s.audit,
+                            &config,
+                            &modules,
+                            &shield_cfg,
+                        );
+                        Html(html)
+                    }
+                }),
+            );
 
-        router = router.route("/metrics", get(move || {
+        router = router.route(
+            "/metrics",
+            get(move || {
                 let s = shield_metrics.clone();
                 let uptime = start_time.elapsed().as_secs();
                 async move {
                     let body = nexus_shield::metrics::render_metrics(&s.audit, uptime);
-                    (StatusCode::OK, [("content-type", "text/plain; version=0.0.4")], body)
+                    (
+                        StatusCode::OK,
+                        [("content-type", "text/plain; version=0.0.4")],
+                        body,
+                    )
                 }
-            }));
+            }),
+        );
 
         if let Some(ep_routes) = endpoint_routes {
             router = router.merge(ep_routes);
         }
 
         router
-            .fallback(|| async {
-                (StatusCode::OK, "NexusShield: request inspected and allowed")
-            })
+            .fallback(|| async { (StatusCode::OK, "NexusShield: request inspected and allowed") })
             .layer(middleware::from_fn(nexus_shield::auth::auth_middleware))
-            .layer(Extension(nexus_shield::auth::AuthToken(shield.config.api_token.clone())))
+            .layer(Extension(nexus_shield::auth::AuthToken(
+                shield.config.api_token.clone(),
+            )))
             .layer(middleware::from_fn(shield_middleware))
             .layer(Extension(shield.clone()))
     } else {
@@ -377,24 +514,27 @@ async fn main() {
             .route("/health", get(|| async { "NexusShield OK" }))
             .route("/dashboard", get(dashboard_handler))
             .route("/logo.png", get(logo_handler))
-            .route("/status", get(move || async move {
-                status_handler(shield_status.clone()).await
-            }))
-            .route("/audit", get(move || async move {
-                audit_handler(shield_audit.clone()).await
-            }))
-            .route("/stats", get(move || async move {
-                stats_handler(shield_stats.clone()).await
-            }))
+            .route(
+                "/status",
+                get(move || async move { status_handler(shield_status.clone()).await }),
+            )
+            .route(
+                "/audit",
+                get(move || async move { audit_handler(shield_audit.clone()).await }),
+            )
+            .route(
+                "/stats",
+                get(move || async move { stats_handler(shield_stats.clone()).await }),
+            )
             .fallback(move |req: Request| {
                 let upstream = proxy_upstream.clone();
                 let client = proxy_client.clone();
-                async move {
-                    proxy_handler(req, &upstream, &client).await
-                }
+                async move { proxy_handler(req, &upstream, &client).await }
             })
             .layer(middleware::from_fn(nexus_shield::auth::auth_middleware))
-            .layer(Extension(nexus_shield::auth::AuthToken(shield.config.api_token.clone())))
+            .layer(Extension(nexus_shield::auth::AuthToken(
+                shield.config.api_token.clone(),
+            )))
             .layer(middleware::from_fn(shield_middleware))
             .layer(Extension(shield.clone()))
     };
@@ -408,9 +548,10 @@ async fn main() {
 
     if let (Some(cert_path), Some(key_path)) = (tls_cert, tls_key) {
         // TLS mode
-        let tls_config = axum_server::tls_rustls::RustlsConfig::from_pem_file(&cert_path, &key_path)
-            .await
-            .expect("Failed to load TLS certificate/key");
+        let tls_config =
+            axum_server::tls_rustls::RustlsConfig::from_pem_file(&cert_path, &key_path)
+                .await
+                .expect("Failed to load TLS certificate/key");
 
         tracing::info!(
             cert = %cert_path,
@@ -426,14 +567,9 @@ async fn main() {
     } else {
         // Plain HTTP mode
         let listener = TcpListener::bind(&addr).await.expect("Failed to bind");
-        tracing::info!(
-            "NexusShield active — HTTP on port {}",
-            args.port
-        );
+        tracing::info!("NexusShield active — HTTP on port {}", args.port);
 
-        axum::serve(listener, app)
-            .await
-            .expect("Server failed");
+        axum::serve(listener, app).await.expect("Server failed");
     }
 }
 
@@ -442,7 +578,9 @@ async fn proxy_handler(
     upstream: &str,
     client: &Client<hyper_util::client::legacy::connect::HttpConnector, axum::body::Body>,
 ) -> Response {
-    let path = req.uri().path_and_query()
+    let path = req
+        .uri()
+        .path_and_query()
         .map(|pq| pq.as_str())
         .unwrap_or("/");
 
@@ -454,7 +592,9 @@ async fn proxy_handler(
             match client.request(req).await {
                 Ok(resp) => {
                     let (parts, body) = resp.into_parts();
-                    let bytes = body.collect().await
+                    let bytes = body
+                        .collect()
+                        .await
                         .map(|b| b.to_bytes())
                         .unwrap_or_default();
                     Response::from_parts(parts, axum::body::Body::from(bytes))
@@ -465,9 +605,7 @@ async fn proxy_handler(
                 }
             }
         }
-        Err(_) => {
-            (StatusCode::BAD_REQUEST, "Invalid upstream URI").into_response()
-        }
+        Err(_) => (StatusCode::BAD_REQUEST, "Invalid upstream URI").into_response(),
     }
 }
 
@@ -479,7 +617,10 @@ async fn logo_handler() -> impl IntoResponse {
     let bytes: &'static [u8] = include_bytes!("../../assets/NexusShield_logo.png");
     (
         StatusCode::OK,
-        [("content-type", "image/png"), ("cache-control", "public, max-age=86400")],
+        [
+            ("content-type", "image/png"),
+            ("cache-control", "public, max-age=86400"),
+        ],
         bytes,
     )
 }
@@ -545,22 +686,28 @@ async fn status_handler(shield: Arc<Shield>) -> impl IntoResponse {
 
 async fn audit_handler(shield: Arc<Shield>) -> impl IntoResponse {
     let recent = shield.audit.recent(50);
-    let events: Vec<serde_json::Value> = recent.iter().map(|e| {
-        serde_json::json!({
-            "id": e.id,
-            "timestamp": e.timestamp.to_rfc3339(),
-            "event_type": format!("{:?}", e.event_type),
-            "source_ip": e.source_ip,
-            "details": e.details,
-            "threat_score": e.threat_score,
+    let events: Vec<serde_json::Value> = recent
+        .iter()
+        .map(|e| {
+            serde_json::json!({
+                "id": e.id,
+                "timestamp": e.timestamp.to_rfc3339(),
+                "event_type": format!("{:?}", e.event_type),
+                "source_ip": e.source_ip,
+                "details": e.details,
+                "threat_score": e.threat_score,
+            })
         })
-    }).collect();
+        .collect();
 
-    (StatusCode::OK, axum::Json(serde_json::json!({
-        "recent_events": events,
-        "total": shield.audit.len(),
-        "chain_valid": shield.audit.verify_chain().valid,
-    })))
+    (
+        StatusCode::OK,
+        axum::Json(serde_json::json!({
+            "recent_events": events,
+            "total": shield.audit.len(),
+            "chain_valid": shield.audit.verify_chain().valid,
+        })),
+    )
 }
 
 async fn stats_handler(shield: Arc<Shield>) -> impl IntoResponse {
@@ -593,68 +740,252 @@ async fn stats_handler(shield: Arc<Shield>) -> impl IntoResponse {
 
 async fn endpoint_status_handler(engine: Arc<EndpointEngine>) -> impl IntoResponse {
     let stats = engine.stats();
-    (StatusCode::OK, axum::Json(serde_json::json!({
-        "endpoint_protection": "active",
-        "total_files_scanned": stats.total_files_scanned,
-        "total_threats_detected": stats.total_threats_detected,
-        "active_monitors": stats.active_monitors,
-        "scanners_active": stats.scanners_active,
-        "quarantined_files": stats.quarantined_files,
-        "last_scan_time": stats.last_scan_time.map(|t| t.to_rfc3339()),
-    })))
+    (
+        StatusCode::OK,
+        axum::Json(serde_json::json!({
+            "endpoint_protection": "active",
+            "total_files_scanned": stats.total_files_scanned,
+            "total_threats_detected": stats.total_threats_detected,
+            "active_monitors": stats.active_monitors,
+            "scanners_active": stats.scanners_active,
+            "quarantined_files": stats.quarantined_files,
+            "last_scan_time": stats.last_scan_time.map(|t| t.to_rfc3339()),
+        })),
+    )
 }
 
 async fn endpoint_detections_handler(engine: Arc<EndpointEngine>) -> impl IntoResponse {
     let detections = engine.recent_detections(100);
-    let events: Vec<serde_json::Value> = detections.iter().map(|d| {
-        serde_json::json!({
-            "id": d.id,
-            "timestamp": d.timestamp.to_rfc3339(),
-            "scanner": d.scanner,
-            "target": d.target,
-            "severity": format!("{}", d.severity),
-            "description": d.description,
-            "confidence": d.confidence,
-            "action": format!("{}", d.action),
-            "artifact_hash": d.artifact_hash,
+    let events: Vec<serde_json::Value> = detections
+        .iter()
+        .map(|d| {
+            serde_json::json!({
+                "id": d.id,
+                "timestamp": d.timestamp.to_rfc3339(),
+                "scanner": d.scanner,
+                "target": d.target,
+                "severity": format!("{}", d.severity),
+                "description": d.description,
+                "confidence": d.confidence,
+                "action": format!("{}", d.action),
+                "artifact_hash": d.artifact_hash,
+            })
         })
-    }).collect();
+        .collect();
 
-    (StatusCode::OK, axum::Json(serde_json::json!({
-        "detections": events,
-        "total": detections.len(),
-    })))
+    (
+        StatusCode::OK,
+        axum::Json(serde_json::json!({
+            "detections": events,
+            "total": detections.len(),
+        })),
+    )
 }
 
 async fn endpoint_quarantine_handler(engine: Arc<EndpointEngine>) -> impl IntoResponse {
     let entries = engine.quarantine.list_entries();
-    let items: Vec<serde_json::Value> = entries.iter().map(|e| {
-        serde_json::json!({
-            "id": e.id,
-            "original_path": e.original_path.to_string_lossy(),
-            "sha256": e.sha256,
-            "detection_reason": e.detection_reason,
-            "scanner": e.scanner,
-            "severity": format!("{}", e.severity),
-            "quarantined_at": e.quarantined_at.to_rfc3339(),
-            "file_size": e.file_size,
+    let items: Vec<serde_json::Value> = entries
+        .iter()
+        .map(|e| {
+            serde_json::json!({
+                "id": e.id,
+                "original_path": e.original_path.to_string_lossy(),
+                "sha256": e.sha256,
+                "detection_reason": e.detection_reason,
+                "scanner": e.scanner,
+                "severity": format!("{}", e.severity),
+                "quarantined_at": e.quarantined_at.to_rfc3339(),
+                "file_size": e.file_size,
+            })
         })
-    }).collect();
+        .collect();
 
-    (StatusCode::OK, axum::Json(serde_json::json!({
-        "quarantined_files": items,
-        "total": entries.len(),
-        "vault_size_bytes": engine.quarantine.vault_size(),
-    })))
+    (
+        StatusCode::OK,
+        axum::Json(serde_json::json!({
+            "quarantined_files": items,
+            "total": entries.len(),
+            "vault_size_bytes": engine.quarantine.vault_size(),
+        })),
+    )
+}
+
+/// POST /endpoint/allowlist/cidr — append a CIDR to the runtime allowlist
+/// AND persist it into `runtime_allowlist_cidrs` in config.toml so it
+/// survives a shield restart. Body:
+///   `{"cidr": "45.33.0.0/16", "reason": "Linode — Ubuntu mirrors"}`.
+/// Bearer-authenticated by the outer middleware layer.
+async fn endpoint_allowlist_cidr_handler(
+    engine: Arc<EndpointEngine>,
+    config_path: Arc<String>,
+    body: String,
+) -> impl IntoResponse {
+    #[derive(serde::Deserialize)]
+    struct Req {
+        cidr: String,
+        #[serde(default)]
+        reason: String,
+    }
+
+    let req: Req = match serde_json::from_str(&body) {
+        Ok(v) => v,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                axum::Json(serde_json::json!({"error": format!("bad json: {e}")})),
+            );
+        }
+    };
+
+    // Validate: must parse as "A.B.C.D/P" with P >= 12 (no wildly broad
+    // allowlists). Matches the guardrail in the shield agent prompt.
+    let Some((net, prefix)) = req.cidr.split_once('/') else {
+        return (
+            StatusCode::BAD_REQUEST,
+            axum::Json(serde_json::json!({"error": "cidr must be IPv4/prefix"})),
+        );
+    };
+    let Ok(p) = prefix.parse::<u8>() else {
+        return (
+            StatusCode::BAD_REQUEST,
+            axum::Json(serde_json::json!({"error": "bad prefix"})),
+        );
+    };
+    if !(12..=32).contains(&p) {
+        return (
+            StatusCode::BAD_REQUEST,
+            axum::Json(serde_json::json!({"error": "prefix must be in [12, 32]"})),
+        );
+    }
+    if net.split('.').count() != 4 {
+        return (
+            StatusCode::BAD_REQUEST,
+            axum::Json(serde_json::json!({"error": "not IPv4"})),
+        );
+    }
+
+    engine.runtime_allowlist.add_cidr(&req.cidr);
+
+    // Persist to config.toml so it survives restart. If the write fails
+    // (permissions, disk full), keep the in-memory entry but surface the
+    // error in the response — the caller can decide whether to retry.
+    let persist_err = nexus_shield::endpoint::runtime_allowlist::persist_allowlist_entry(
+        std::path::Path::new(config_path.as_str()),
+        nexus_shield::endpoint::runtime_allowlist::PersistKind::Cidr,
+        &req.cidr,
+    )
+    .err();
+
+    if let Some(ref e) = persist_err {
+        tracing::warn!(cidr = %req.cidr, err = %e, "runtime allowlist: cidr added in-memory but NOT persisted");
+    } else {
+        tracing::info!(cidr = %req.cidr, reason = %req.reason, "runtime allowlist: cidr added + persisted");
+    }
+
+    (
+        StatusCode::OK,
+        axum::Json(serde_json::json!({
+            "ok": true,
+            "cidr": req.cidr,
+            "reason": req.reason,
+            "cidrs_total": engine.runtime_allowlist.cidrs_snapshot().len(),
+            "persisted": persist_err.is_none(),
+            "persist_error": persist_err,
+        })),
+    )
+}
+
+/// POST /endpoint/allowlist/process — append a process comm to the
+/// runtime allowlist AND persist it into config.toml.
+/// Body: `{"comm": "ollama", "reason": "..."}`.
+async fn endpoint_allowlist_process_handler(
+    engine: Arc<EndpointEngine>,
+    config_path: Arc<String>,
+    body: String,
+) -> impl IntoResponse {
+    #[derive(serde::Deserialize)]
+    struct Req {
+        comm: String,
+        #[serde(default)]
+        reason: String,
+    }
+
+    let req: Req = match serde_json::from_str(&body) {
+        Ok(v) => v,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                axum::Json(serde_json::json!({"error": format!("bad json: {e}")})),
+            );
+        }
+    };
+
+    // Blocklist of core system processes that must never be allowlisted —
+    // matches the shield agent prompt guardrail.
+    const FORBIDDEN: &[&str] = &[
+        "init", "systemd", "kernel", "kthreadd",
+    ];
+    let lc = req.comm.to_ascii_lowercase();
+    if FORBIDDEN.iter().any(|f| lc == *f) {
+        return (
+            StatusCode::BAD_REQUEST,
+            axum::Json(serde_json::json!({"error": "cannot allowlist core system process"})),
+        );
+    }
+    if req.comm.trim().is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            axum::Json(serde_json::json!({"error": "comm cannot be empty"})),
+        );
+    }
+
+    engine.runtime_allowlist.add_process(&req.comm);
+
+    let persist_err = nexus_shield::endpoint::runtime_allowlist::persist_allowlist_entry(
+        std::path::Path::new(config_path.as_str()),
+        nexus_shield::endpoint::runtime_allowlist::PersistKind::Process,
+        &req.comm,
+    )
+    .err();
+
+    if let Some(ref e) = persist_err {
+        tracing::warn!(comm = %req.comm, err = %e, "runtime allowlist: process added in-memory but NOT persisted");
+    } else {
+        tracing::info!(comm = %req.comm, reason = %req.reason, "runtime allowlist: process added + persisted");
+    }
+
+    (
+        StatusCode::OK,
+        axum::Json(serde_json::json!({
+            "ok": true,
+            "comm": req.comm,
+            "reason": req.reason,
+            "processes_total": engine.runtime_allowlist.processes_snapshot().len(),
+            "persisted": persist_err.is_none(),
+            "persist_error": persist_err,
+        })),
+    )
+}
+
+/// GET /endpoint/allowlist — return the current runtime allowlist
+/// (cidrs + processes). Used by the ticker to show what's already allowed.
+async fn endpoint_allowlist_get_handler(engine: Arc<EndpointEngine>) -> impl IntoResponse {
+    let snap = nexus_shield::endpoint::runtime_allowlist::RuntimeAllowlistSnapshot::from(
+        &*engine.runtime_allowlist,
+    );
+    (StatusCode::OK, axum::Json(snap))
 }
 
 async fn endpoint_scan_handler(engine: Arc<EndpointEngine>, body: String) -> impl IntoResponse {
     let path = std::path::Path::new(body.trim());
     if !path.exists() {
-        return (StatusCode::BAD_REQUEST, axum::Json(serde_json::json!({
-            "error": "Path does not exist",
-            "path": body.trim(),
-        })));
+        return (
+            StatusCode::BAD_REQUEST,
+            axum::Json(serde_json::json!({
+                "error": "Path does not exist",
+                "path": body.trim(),
+            })),
+        );
     }
 
     let results = if path.is_dir() {
@@ -663,21 +994,27 @@ async fn endpoint_scan_handler(engine: Arc<EndpointEngine>, body: String) -> imp
         engine.scan_file(path).await
     };
 
-    let detections: Vec<serde_json::Value> = results.iter().map(|r| {
-        serde_json::json!({
-            "scanner": r.scanner,
-            "target": r.target,
-            "severity": format!("{}", r.severity),
-            "description": r.description,
-            "confidence": r.confidence,
-            "artifact_hash": r.artifact_hash,
+    let detections: Vec<serde_json::Value> = results
+        .iter()
+        .map(|r| {
+            serde_json::json!({
+                "scanner": r.scanner,
+                "target": r.target,
+                "severity": format!("{}", r.severity),
+                "description": r.description,
+                "confidence": r.confidence,
+                "artifact_hash": r.artifact_hash,
+            })
         })
-    }).collect();
+        .collect();
 
-    (StatusCode::OK, axum::Json(serde_json::json!({
-        "path": body.trim(),
-        "clean": results.is_empty(),
-        "threats_found": results.len(),
-        "detections": detections,
-    })))
+    (
+        StatusCode::OK,
+        axum::Json(serde_json::json!({
+            "path": body.trim(),
+            "clean": results.is_empty(),
+            "threats_found": results.len(),
+            "detections": detections,
+        })),
+    )
 }

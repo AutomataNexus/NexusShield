@@ -162,8 +162,7 @@ impl HeuristicEngine {
 
             // Check program headers for RWX segments
             let e_phoff = u64::from_le_bytes([
-                data[32], data[33], data[34], data[35],
-                data[36], data[37], data[38], data[39],
+                data[32], data[33], data[34], data[35], data[36], data[37], data[38], data[39],
             ]) as usize;
             let e_phnum = u16::from_le_bytes([data[56], data[57]]) as usize;
             let phent_size = 56usize; // sizeof(Elf64_Phdr)
@@ -176,10 +175,16 @@ impl HeuristicEngine {
 
                 // p_type at offset+0 (4 bytes), p_flags at offset+4 (4 bytes)
                 let p_type = u32::from_le_bytes([
-                    data[offset], data[offset + 1], data[offset + 2], data[offset + 3],
+                    data[offset],
+                    data[offset + 1],
+                    data[offset + 2],
+                    data[offset + 3],
                 ]);
                 let p_flags = u32::from_le_bytes([
-                    data[offset + 4], data[offset + 5], data[offset + 6], data[offset + 7],
+                    data[offset + 4],
+                    data[offset + 5],
+                    data[offset + 6],
+                    data[offset + 7],
                 ]);
 
                 // PT_LOAD = 1, PF_X = 1, PF_W = 2, PF_R = 4
@@ -274,8 +279,12 @@ impl HeuristicEngine {
         }
 
         // Particularly dangerous: document/image extension hiding an executable
-        let is_exe_disguise = (claimed == "pdf" || claimed == "png" || claimed == "jpeg"
-            || claimed == "gif" || claimed == "bmp" || claimed == "zip")
+        let is_exe_disguise = (claimed == "pdf"
+            || claimed == "png"
+            || claimed == "jpeg"
+            || claimed == "gif"
+            || claimed == "bmp"
+            || claimed == "zip")
             && (actual == "pe" || actual == "elf");
 
         let severity = if is_exe_disguise {
@@ -363,7 +372,8 @@ impl HeuristicEngine {
 
         // eval/exec with base64 or decode
         let eval_re =
-            regex::Regex::new(r"(?i)(eval|exec)\s*\(.*?(base64|decode|fromcharcode|chr\()").unwrap();
+            regex::Regex::new(r"(?i)(eval|exec)\s*\(.*?(base64|decode|fromcharcode|chr\()")
+                .unwrap();
         if eval_re.is_match(&text) {
             results.push(ScanResult::new(
                 "heuristic_engine",
@@ -417,7 +427,18 @@ impl HeuristicEngine {
         // Only check non-executable file types
         let is_document = matches!(
             ext.as_str(),
-            "pdf" | "doc" | "docx" | "xls" | "xlsx" | "ppt" | "pptx" | "csv" | "txt" | "rtf" | "odt" | "ods"
+            "pdf"
+                | "doc"
+                | "docx"
+                | "xls"
+                | "xlsx"
+                | "ppt"
+                | "pptx"
+                | "csv"
+                | "txt"
+                | "rtf"
+                | "odt"
+                | "ods"
         );
 
         if !is_document {
@@ -521,7 +542,10 @@ impl HeuristicEngine {
         // Only check ELF binaries and scripts (not images, docs, etc.)
         let is_elf = data.len() >= 4 && data.starts_with(b"\x7FELF");
         let is_script = data.len() >= 2 && data.starts_with(b"#!");
-        let is_text = data.iter().take(512).all(|&b| b.is_ascii() || b == b'\n' || b == b'\r' || b == b'\t');
+        let is_text = data
+            .iter()
+            .take(512)
+            .all(|&b| b.is_ascii() || b == b'\n' || b == b'\r' || b == b'\t');
 
         if !is_elf && !is_script && !is_text {
             return results;
@@ -557,7 +581,11 @@ impl HeuristicEngine {
                     DetectionCategory::HeuristicAnomaly {
                         rule: "miner_pool_protocol".to_string(),
                     },
-                    format!("Cryptocurrency miner indicator: {} found in {}", desc, path.display()),
+                    format!(
+                        "Cryptocurrency miner indicator: {} found in {}",
+                        desc,
+                        path.display()
+                    ),
                     0.95,
                     RecommendedAction::Quarantine {
                         source_path: path.to_path_buf(),
@@ -569,8 +597,15 @@ impl HeuristicEngine {
 
         // Mining algorithm strings
         let algo_indicators: &[&str] = &[
-            "cryptonight", "randomx", "kawpow", "ethash", "equihash",
-            "scrypt", "blake2b", "ghostrider", "autolykos",
+            "cryptonight",
+            "randomx",
+            "kawpow",
+            "ethash",
+            "equihash",
+            "scrypt",
+            "blake2b",
+            "ghostrider",
+            "autolykos",
         ];
 
         let mut algo_count = 0;
@@ -590,7 +625,8 @@ impl HeuristicEngine {
                 },
                 format!(
                     "Multiple mining algorithm names ({}) found in {} — likely crypto miner",
-                    algo_count, path.display()
+                    algo_count,
+                    path.display()
                 ),
                 0.85,
                 RecommendedAction::Quarantine {
@@ -600,13 +636,23 @@ impl HeuristicEngine {
         }
 
         // Known miner binary name patterns in the filename
-        let filename = path.file_name()
+        let filename = path
+            .file_name()
             .map(|n| n.to_string_lossy().to_lowercase())
             .unwrap_or_default();
         let miner_names = [
-            "xmrig", "minerd", "cpuminer", "ethminer", "nbminer",
-            "phoenixminer", "t-rex", "lolminer", "gminer",
-            "kdevtmpfsi", "kinsing", "xmr-stak",
+            "xmrig",
+            "minerd",
+            "cpuminer",
+            "ethminer",
+            "nbminer",
+            "phoenixminer",
+            "t-rex",
+            "lolminer",
+            "gminer",
+            "kdevtmpfsi",
+            "kinsing",
+            "xmr-stak",
         ];
         for name in &miner_names {
             if filename.contains(name) {
@@ -617,7 +663,11 @@ impl HeuristicEngine {
                     DetectionCategory::HeuristicAnomaly {
                         rule: "miner_filename".to_string(),
                     },
-                    format!("Known miner filename pattern '{}' in {}", name, path.display()),
+                    format!(
+                        "Known miner filename pattern '{}' in {}",
+                        name,
+                        path.display()
+                    ),
                     0.95,
                     RecommendedAction::Quarantine {
                         source_path: path.to_path_buf(),
@@ -631,7 +681,10 @@ impl HeuristicEngine {
         if content_lower.contains("wallet") || content_lower.contains("--user") {
             // Look for Monero-style addresses (starts with 4 and is 95 chars)
             for word in content.split_whitespace() {
-                if word.len() == 95 && word.starts_with('4') && word.chars().all(|c| c.is_alphanumeric()) {
+                if word.len() == 95
+                    && word.starts_with('4')
+                    && word.chars().all(|c| c.is_alphanumeric())
+                {
                     results.push(ScanResult::new(
                         "heuristic_engine",
                         path.to_string_lossy(),
@@ -770,12 +823,16 @@ mod tests {
     fn elf_header_detection() {
         // Craft a minimal valid 64-bit LE ELF header (64 bytes)
         let mut elf = vec![0u8; 128];
-        elf[0] = 0x7F; elf[1] = b'E'; elf[2] = b'L'; elf[3] = b'F'; // magic
-        elf[4] = 2;    // 64-bit
-        elf[5] = 1;    // little-endian
-        elf[6] = 1;    // EV_CURRENT
+        elf[0] = 0x7F;
+        elf[1] = b'E';
+        elf[2] = b'L';
+        elf[3] = b'F'; // magic
+        elf[4] = 2; // 64-bit
+        elf[5] = 1; // little-endian
+        elf[6] = 1; // EV_CURRENT
         // e_shnum at offset 60: set to 0 (stripped)
-        elf[60] = 0; elf[61] = 0;
+        elf[60] = 0;
+        elf[61] = 0;
 
         let engine = HeuristicEngine::new(HeuristicConfig::default());
         let results = engine.check_elf_header(&elf, Path::new("/tmp/test.elf"));

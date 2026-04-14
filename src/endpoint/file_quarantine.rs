@@ -77,7 +77,9 @@ impl QuarantineVault {
     ) -> Result<QuarantineEntry, String> {
         // Read file and compute hash
         let mut file = std::fs::File::open(path).map_err(|e| format!("Cannot open file: {}", e))?;
-        let metadata = file.metadata().map_err(|e| format!("Cannot read metadata: {}", e))?;
+        let metadata = file
+            .metadata()
+            .map_err(|e| format!("Cannot read metadata: {}", e))?;
         let file_size = metadata.len();
 
         // Check vault size limit
@@ -89,7 +91,9 @@ impl QuarantineVault {
         let mut hasher = Sha256::new();
         let mut buf = [0u8; 8192];
         loop {
-            let n = file.read(&mut buf).map_err(|e| format!("Read error: {}", e))?;
+            let n = file
+                .read(&mut buf)
+                .map_err(|e| format!("Read error: {}", e))?;
             if n == 0 {
                 break;
             }
@@ -113,8 +117,7 @@ impl QuarantineVault {
         // Copy file to quarantine (then delete original)
         std::fs::copy(path, &quarantine_path)
             .map_err(|e| format!("Copy to quarantine failed: {}", e))?;
-        std::fs::remove_file(path)
-            .map_err(|e| format!("Remove original failed: {}", e))?;
+        std::fs::remove_file(path).map_err(|e| format!("Remove original failed: {}", e))?;
 
         // Strip permissions on quarantine file
         #[cfg(unix)]
@@ -239,8 +242,7 @@ impl QuarantineVault {
 
     /// Remove entries older than the retention period.
     pub fn cleanup_expired(&self) -> usize {
-        let cutoff = Utc::now()
-            - chrono::Duration::days(self.config.retention_days as i64);
+        let cutoff = Utc::now() - chrono::Duration::days(self.config.retention_days as i64);
 
         let expired: Vec<String> = {
             let idx = self.index.read();
@@ -291,7 +293,8 @@ mod tests {
     use super::*;
 
     fn test_vault() -> (QuarantineVault, PathBuf) {
-        let dir = std::env::temp_dir().join(format!("nexus-quarantine-test-{}", uuid::Uuid::new_v4()));
+        let dir =
+            std::env::temp_dir().join(format!("nexus-quarantine-test-{}", uuid::Uuid::new_v4()));
         let config = QuarantineVaultConfig::new(dir.clone());
         (QuarantineVault::new(config), dir)
     }
@@ -381,7 +384,9 @@ mod tests {
             let vault = QuarantineVault::new(config.clone());
             let f = dir.join("persist.txt");
             std::fs::write(&f, b"data").unwrap();
-            vault.quarantine_file(&f, "test", "s", Severity::High).unwrap();
+            vault
+                .quarantine_file(&f, "test", "s", Severity::High)
+                .unwrap();
             assert_eq!(vault.list_entries().len(), 1);
         }
 
@@ -398,7 +403,9 @@ mod tests {
         let f = dir.join("lookup.txt");
         std::fs::write(&f, b"find me").unwrap();
 
-        let entry = vault.quarantine_file(&f, "test", "s", Severity::Medium).unwrap();
+        let entry = vault
+            .quarantine_file(&f, "test", "s", Severity::Medium)
+            .unwrap();
         let found = vault.get_entry(&entry.id);
         assert!(found.is_some());
         assert_eq!(found.unwrap().sha256, entry.sha256);

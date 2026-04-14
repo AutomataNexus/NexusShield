@@ -63,30 +63,54 @@ pub enum SqlViolation {
 /// Dangerous SQL functions that indicate exploitation attempts.
 const DANGEROUS_FUNCTIONS: &[&str] = &[
     // MySQL file operations
-    "load_file", "into_outfile", "into_dumpfile",
+    "load_file",
+    "into_outfile",
+    "into_dumpfile",
     // PostgreSQL file operations
-    "pg_read_file", "pg_read_binary_file", "pg_ls_dir", "pg_stat_file",
-    "lo_import", "lo_export", "pg_file_write",
+    "pg_read_file",
+    "pg_read_binary_file",
+    "pg_ls_dir",
+    "pg_stat_file",
+    "lo_import",
+    "lo_export",
+    "pg_file_write",
     // PostgreSQL command execution
     "pg_execute_server_program",
     // SQL Server command execution
-    "xp_cmdshell", "sp_oacreate", "sp_oamethod",
+    "xp_cmdshell",
+    "sp_oacreate",
+    "sp_oamethod",
     // MySQL UDF
-    "sys_exec", "sys_eval",
+    "sys_exec",
+    "sys_eval",
     // Time-based blind injection
-    "sleep", "benchmark", "waitfor", "pg_sleep",
+    "sleep",
+    "benchmark",
+    "waitfor",
+    "pg_sleep",
     // XML-based injection
-    "extractvalue", "updatexml",
+    "extractvalue",
+    "updatexml",
     // SQLite attach (can create/modify files)
     "load_extension",
 ];
 
 /// System schemas/catalogs that should not be queried by external users.
 const SYSTEM_SCHEMAS: &[&str] = &[
-    "information_schema", "pg_catalog", "pg_temp", "pg_toast",
-    "sys", "mysql", "performance_schema",
-    "sqlite_master", "sqlite_schema", "sqlite_temp_master",
-    "master", "tempdb", "msdb", "model",
+    "information_schema",
+    "pg_catalog",
+    "pg_temp",
+    "pg_toast",
+    "sys",
+    "mysql",
+    "performance_schema",
+    "sqlite_master",
+    "sqlite_schema",
+    "sqlite_temp_master",
+    "master",
+    "tempdb",
+    "msdb",
+    "model",
 ];
 
 /// Analyze a SQL query string for injection patterns and security threats.
@@ -161,7 +185,13 @@ pub fn analyze_query(sql: &str, config: &SqlFirewallConfig) -> SqlAnalysis {
         match stmt {
             Statement::Query(query) => {
                 let mut depth = 0;
-                analyze_query_body(&query.body, config, &mut violations, &mut risk_score, &mut depth);
+                analyze_query_body(
+                    &query.body,
+                    config,
+                    &mut violations,
+                    &mut risk_score,
+                    &mut depth,
+                );
             }
             other => {
                 let kind = format!("{}", statement_kind(other));
@@ -212,7 +242,9 @@ fn analyze_query_body(
         SetExpr::Select(select) => {
             analyze_select(select, config, violations, risk_score, depth);
         }
-        SetExpr::SetOperation { op, left, right, .. } => {
+        SetExpr::SetOperation {
+            op, left, right, ..
+        } => {
             if matches!(op, SetOperator::Union) {
                 violations.push(SqlViolation::UnionInjection);
                 *risk_score += 0.6;
@@ -270,11 +302,7 @@ fn analyze_select(
     }
 }
 
-fn check_table_factor(
-    tf: &TableFactor,
-    violations: &mut Vec<SqlViolation>,
-    risk_score: &mut f64,
-) {
+fn check_table_factor(tf: &TableFactor, violations: &mut Vec<SqlViolation>, risk_score: &mut f64) {
     match tf {
         TableFactor::Table { name, .. } => {
             for ident in &name.0 {
@@ -297,7 +325,9 @@ fn check_table_factor(
                 &mut depth,
             );
         }
-        TableFactor::NestedJoin { table_with_joins, .. } => {
+        TableFactor::NestedJoin {
+            table_with_joins, ..
+        } => {
             check_table_factor(&table_with_joins.relation, violations, risk_score);
             for join in &table_with_joins.joins {
                 check_table_factor(&join.relation, violations, risk_score);
@@ -389,11 +419,7 @@ fn walk_expr(
 }
 
 /// Detect tautology patterns indicating SQL injection (1=1, 'a'='a', OR TRUE).
-fn check_for_tautologies(
-    expr: &Expr,
-    violations: &mut Vec<SqlViolation>,
-    risk_score: &mut f64,
-) {
+fn check_for_tautologies(expr: &Expr, violations: &mut Vec<SqlViolation>, risk_score: &mut f64) {
     match expr {
         Expr::BinaryOp { left, op, right } => {
             if matches!(op, BinaryOperator::Eq) {
@@ -402,9 +428,8 @@ fn check_for_tautologies(
                     let left_str = format!("{left}");
                     let right_str = format!("{right}");
                     if left_str == right_str {
-                        violations.push(SqlViolation::Tautology(format!(
-                            "{left_str} = {right_str}"
-                        )));
+                        violations
+                            .push(SqlViolation::Tautology(format!("{left_str} = {right_str}")));
                         *risk_score += 0.5;
                     }
                 }
@@ -427,10 +452,7 @@ fn check_for_tautologies(
 }
 
 fn is_literal(expr: &Expr) -> bool {
-    matches!(
-        expr,
-        Expr::Value(_) | Expr::UnaryOp { .. }
-    )
+    matches!(expr, Expr::Value(_) | Expr::UnaryOp { .. })
 }
 
 fn is_always_true(expr: &Expr) -> bool {
@@ -469,7 +491,9 @@ fn contains_line_comment(s: &str) -> bool {
 }
 
 fn has_sql_keywords_near_hex(s: &str) -> bool {
-    let keywords = ["select", "union", "insert", "update", "delete", "drop", "exec"];
+    let keywords = [
+        "select", "union", "insert", "update", "delete", "drop", "exec",
+    ];
     let has_hex = s.contains("0x");
     has_hex && keywords.iter().any(|k| s.contains(k))
 }
@@ -500,7 +524,11 @@ mod tests {
     #[test]
     fn allows_simple_select() {
         let result = analyze_query("SELECT * FROM sensors WHERE id = 1", &default_config());
-        assert!(result.allowed, "Simple SELECT should be allowed: {:?}", result.violations);
+        assert!(
+            result.allowed,
+            "Simple SELECT should be allowed: {:?}",
+            result.violations
+        );
     }
 
     #[test]
@@ -516,17 +544,24 @@ mod tests {
     fn blocks_drop_table() {
         let result = analyze_query("DROP TABLE users", &default_config());
         assert!(!result.allowed);
-        assert!(result.violations.iter().any(|v| matches!(v, SqlViolation::NonSelectStatement(_))));
+        assert!(
+            result
+                .violations
+                .iter()
+                .any(|v| matches!(v, SqlViolation::NonSelectStatement(_)))
+        );
     }
 
     #[test]
     fn blocks_stacked_queries() {
-        let result = analyze_query(
-            "SELECT * FROM sensors; DROP TABLE users",
-            &default_config(),
-        );
+        let result = analyze_query("SELECT * FROM sensors; DROP TABLE users", &default_config());
         assert!(!result.allowed);
-        assert!(result.violations.iter().any(|v| matches!(v, SqlViolation::StackedQueries(_))));
+        assert!(
+            result
+                .violations
+                .iter()
+                .any(|v| matches!(v, SqlViolation::StackedQueries(_)))
+        );
     }
 
     #[test]
@@ -536,7 +571,12 @@ mod tests {
             &default_config(),
         );
         assert!(!result.allowed);
-        assert!(result.violations.iter().any(|v| matches!(v, SqlViolation::UnionInjection)));
+        assert!(
+            result
+                .violations
+                .iter()
+                .any(|v| matches!(v, SqlViolation::UnionInjection))
+        );
     }
 
     #[test]
@@ -546,17 +586,24 @@ mod tests {
             &default_config(),
         );
         assert!(!result.allowed);
-        assert!(result.violations.iter().any(|v| matches!(v, SqlViolation::Tautology(_))));
+        assert!(
+            result
+                .violations
+                .iter()
+                .any(|v| matches!(v, SqlViolation::Tautology(_)))
+        );
     }
 
     #[test]
     fn blocks_information_schema() {
-        let result = analyze_query(
-            "SELECT * FROM information_schema.tables",
-            &default_config(),
-        );
+        let result = analyze_query("SELECT * FROM information_schema.tables", &default_config());
         assert!(!result.allowed);
-        assert!(result.violations.iter().any(|v| matches!(v, SqlViolation::SystemTableAccess(_))));
+        assert!(
+            result
+                .violations
+                .iter()
+                .any(|v| matches!(v, SqlViolation::SystemTableAccess(_)))
+        );
     }
 
     #[test]
@@ -566,7 +613,12 @@ mod tests {
             &default_config(),
         );
         assert!(!result.allowed);
-        assert!(result.violations.iter().any(|v| matches!(v, SqlViolation::DangerousFunction(_))));
+        assert!(
+            result
+                .violations
+                .iter()
+                .any(|v| matches!(v, SqlViolation::DangerousFunction(_)))
+        );
     }
 
     #[test]
@@ -576,7 +628,12 @@ mod tests {
             &default_config(),
         );
         assert!(!result.allowed);
-        assert!(result.violations.iter().any(|v| matches!(v, SqlViolation::DangerousFunction(f) if f == "sleep")));
+        assert!(
+            result
+                .violations
+                .iter()
+                .any(|v| matches!(v, SqlViolation::DangerousFunction(f) if f == "sleep"))
+        );
     }
 
     #[test]
@@ -595,7 +652,12 @@ mod tests {
             &default_config(),
         );
         assert!(!result.allowed);
-        assert!(result.violations.iter().any(|v| matches!(v, SqlViolation::CommentInjection)));
+        assert!(
+            result
+                .violations
+                .iter()
+                .any(|v| matches!(v, SqlViolation::CommentInjection))
+        );
     }
 
     #[test]
@@ -604,6 +666,10 @@ mod tests {
             "SELECT timestamp, supply_temp, return_temp, AVG(supply_temp) OVER (ORDER BY timestamp ROWS BETWEEN 10 PRECEDING AND CURRENT ROW) as moving_avg FROM sensor_readings WHERE location = 'Warren' AND unit = 'AHU-1' AND timestamp >= '2026-01-01' ORDER BY timestamp LIMIT 10000",
             &default_config(),
         );
-        assert!(result.allowed, "Legitimate complex query should pass: {:?}", result.violations);
+        assert!(
+            result.allowed,
+            "Legitimate complex query should pass: {:?}",
+            result.violations
+        );
     }
 }

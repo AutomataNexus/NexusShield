@@ -47,9 +47,8 @@ pub async fn send_alert_email(event: &AuditEvent, config: &FerrumMailConfig) {
 
     let url = format!("{}/api/v1/send", config.api_url.trim_end_matches('/'));
 
-    let client = hyper_util::client::legacy::Client::builder(
-        hyper_util::rt::TokioExecutor::new(),
-    ).build_http::<axum::body::Body>();
+    let client = hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new())
+        .build_http::<axum::body::Body>();
 
     let body = serde_json::to_string(&payload).unwrap_or_default();
 

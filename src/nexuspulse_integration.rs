@@ -59,8 +59,11 @@ pub async fn send_sms_alert(event: &AuditEvent, config: &NexusPulseConfig) {
             // Plain SMS body
             let body = format!(
                 "[NexusShield {}] {:?} from {} — {} (score: {:.3})",
-                severity, event.event_type, event.source_ip,
-                truncate(&event.details, 120), event.threat_score
+                severity,
+                event.event_type,
+                event.source_ip,
+                truncate(&event.details, 120),
+                event.threat_score
             );
             let mut msg = serde_json::json!({
                 "to": recipient,
@@ -80,9 +83,9 @@ pub async fn send_sms_alert(event: &AuditEvent, config: &NexusPulseConfig) {
 
         let url = format!("{}/api/v1/sms/send", config.api_url.trim_end_matches('/'));
 
-        let client = hyper_util::client::legacy::Client::builder(
-            hyper_util::rt::TokioExecutor::new(),
-        ).build_http::<axum::body::Body>();
+        let client =
+            hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new())
+                .build_http::<axum::body::Body>();
 
         let body = serde_json::to_string(&payload).unwrap_or_default();
 

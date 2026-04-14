@@ -9,8 +9,8 @@
 
 use super::{DetectionCategory, RecommendedAction, ScanResult, Severity};
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Configuration for the memory scanner.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -256,8 +256,7 @@ impl MemoryScanner {
         let interval_secs = self.config.scan_interval_secs;
 
         tokio::spawn(async move {
-            let mut interval =
-                tokio::time::interval(std::time::Duration::from_secs(interval_secs));
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
 
             while running.load(Ordering::Relaxed) {
                 interval.tick().await;
@@ -412,8 +411,7 @@ mod tests {
         let data = b"This is perfectly normal program text without any shellcode.";
         let scanner = MemoryScanner::new(MemoryScanConfig::default());
         for pattern in &scanner.shellcode_patterns {
-            let matches =
-                MemoryScanner::pattern_match(data, &pattern.pattern, &pattern.mask);
+            let matches = MemoryScanner::pattern_match(data, &pattern.pattern, &pattern.mask);
             assert!(
                 matches.is_empty(),
                 "False positive for pattern '{}'",

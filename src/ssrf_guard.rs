@@ -183,11 +183,11 @@ fn validate_hostname(hostname: &str, config: &SsrfConfig) -> Result<(), String> 
             "169.254.169.254",
             "metadata",
         ];
-        if metadata_hosts.iter().any(|h| lower == *h || lower.ends_with(h)) {
-            return Err(format!(
-                "Cloud metadata hostname '{}' is blocked",
-                hostname
-            ));
+        if metadata_hosts
+            .iter()
+            .any(|h| lower == *h || lower.ends_with(h))
+        {
+            return Err(format!("Cloud metadata hostname '{}' is blocked", hostname));
         }
     }
 
@@ -218,7 +218,13 @@ mod tests {
 
     #[test]
     fn allows_public_url() {
-        assert!(validate_url("http://influxdb.example.com:8086/api/v3/query_sql", &default_config()).is_ok());
+        assert!(
+            validate_url(
+                "http://influxdb.example.com:8086/api/v3/query_sql",
+                &default_config()
+            )
+            .is_ok()
+        );
     }
 
     #[test]
@@ -241,8 +247,20 @@ mod tests {
 
     #[test]
     fn blocks_cloud_metadata() {
-        assert!(validate_url("http://169.254.169.254/latest/meta-data/", &default_config()).is_err());
-        assert!(validate_url("http://metadata.google.internal/computeMetadata/v1/", &default_config()).is_err());
+        assert!(
+            validate_url(
+                "http://169.254.169.254/latest/meta-data/",
+                &default_config()
+            )
+            .is_err()
+        );
+        assert!(
+            validate_url(
+                "http://metadata.google.internal/computeMetadata/v1/",
+                &default_config()
+            )
+            .is_err()
+        );
     }
 
     #[test]

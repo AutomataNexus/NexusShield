@@ -26,7 +26,8 @@ pub fn render_metrics(audit: &Arc<AuditChain>, uptime_secs: u64) -> String {
     let blocked_hour = audit.count_since(&SecurityEventType::RequestBlocked, last_hour) as u64;
     let blocked_5min = audit.count_since(&SecurityEventType::RequestBlocked, last_5min) as u64;
     let rate_limited_hour = audit.count_since(&SecurityEventType::RateLimitHit, last_hour) as u64;
-    let sql_injection_hour = audit.count_since(&SecurityEventType::SqlInjectionAttempt, last_hour) as u64;
+    let sql_injection_hour =
+        audit.count_since(&SecurityEventType::SqlInjectionAttempt, last_hour) as u64;
     let ssrf_hour = audit.count_since(&SecurityEventType::SsrfAttempt, last_hour) as u64;
     let malware_hour = audit.count_since(&SecurityEventType::MalwareDetected, last_hour) as u64;
     let chain_valid = if audit.verify_chain().valid { 1 } else { 0 };
@@ -81,7 +82,12 @@ mod tests {
     fn metrics_with_events() {
         let audit = Arc::new(AuditChain::new());
         audit.record(SecurityEventType::RequestBlocked, "1.2.3.4", "test", 0.8);
-        audit.record(SecurityEventType::SqlInjectionAttempt, "1.2.3.4", "union", 0.9);
+        audit.record(
+            SecurityEventType::SqlInjectionAttempt,
+            "1.2.3.4",
+            "union",
+            0.9,
+        );
         let output = render_metrics(&audit, 120);
         assert!(output.contains("nexus_shield_audit_events_total 2"));
         assert!(output.contains("nexus_shield_requests_blocked_5min 1"));
@@ -98,7 +104,11 @@ mod tests {
             }
             let parts: Vec<&str> = line.split_whitespace().collect();
             assert_eq!(parts.len(), 2, "Invalid metric line: {}", line);
-            assert!(parts[1].parse::<u64>().is_ok(), "Non-numeric value: {}", line);
+            assert!(
+                parts[1].parse::<u64>().is_ok(),
+                "Non-numeric value: {}",
+                line
+            );
         }
     }
 }

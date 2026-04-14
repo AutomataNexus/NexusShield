@@ -20,6 +20,7 @@ pub mod memory_scanner;
 pub mod network_monitor;
 pub mod process_monitor;
 pub mod rootkit_detector;
+pub mod runtime_allowlist;
 pub mod signatures;
 pub mod supply_chain;
 pub mod threat_intel;
@@ -32,8 +33,8 @@ use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::audit_chain::{AuditChain, SecurityEventType};
 
@@ -70,14 +71,34 @@ impl std::fmt::Display for Severity {
 /// Category of a detection, carrying module-specific metadata.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum DetectionCategory {
-    MalwareSignature { name: String, family: String },
-    HeuristicAnomaly { rule: String },
-    SuspiciousProcess { pid: u32, name: String },
-    NetworkAnomaly { connection: String },
-    MemoryAnomaly { pid: u32, region: String },
-    RootkitIndicator { technique: String },
-    YaraMatch { rule_name: String, tags: Vec<String> },
-    FilelessMalware { technique: String },
+    MalwareSignature {
+        name: String,
+        family: String,
+    },
+    HeuristicAnomaly {
+        rule: String,
+    },
+    SuspiciousProcess {
+        pid: u32,
+        name: String,
+    },
+    NetworkAnomaly {
+        connection: String,
+    },
+    MemoryAnomaly {
+        pid: u32,
+        region: String,
+    },
+    RootkitIndicator {
+        technique: String,
+    },
+    YaraMatch {
+        rule_name: String,
+        tags: Vec<String>,
+    },
+    FilelessMalware {
+        technique: String,
+    },
 }
 
 // =============================================================================
@@ -243,9 +264,9 @@ impl Default for EndpointConfig {
             enable_network_monitor: true,
             enable_memory_scanner: false, // requires elevated privileges
             enable_rootkit_detector: false, // requires root
-            enable_dns_filter: false, // opt-in: requires configuring system DNS
-            enable_usb_monitor: true, // on by default: monitors for USB insertions
-            enable_fim: false, // opt-in: baselines system files, alerts on changes
+            enable_dns_filter: false,     // opt-in: requires configuring system DNS
+            enable_usb_monitor: true,     // on by default: monitors for USB insertions
+            enable_fim: false,            // opt-in: baselines system files, alerts on changes
             data_dir: data_dir.clone(),
             watcher: watcher::WatcherConfig::default(),
             process_monitor: process_monitor::ProcessMonitorConfig::default(),
@@ -285,6 +306,14 @@ pub struct EndpointStats {
     pub scanners_active: Vec<String>,
 }
 
+/// Summary returned by a streaming directory scan.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct ScanStreamSummary {
+    pub files_scanned: u64,
+    pub detections: u64,
+    pub deadline_hit: bool,
+}
+
 // =============================================================================
 // Endpoint Engine
 // =============================================================================
@@ -305,6 +334,9 @@ pub struct EndpointEngine {
     pub container_scanner: container_scanner::ContainerScanner,
     /// Supply chain dependency scanner (on-demand).
     pub supply_chain_scanner: supply_chain::SupplyChainScanner,
+    /// Runtime allowlist appended to by the shield agent + ticker (hot,
+    /// not persisted to config.toml). Shared with NetworkMonitor.
+    pub runtime_allowlist: Arc<runtime_allowlist::RuntimeAllowlist>,
     /// Broadcast channel for real-time scan results.
     result_tx: tokio::sync::broadcast::Sender<ScanResult>,
     /// Detection history (ring buffer).
@@ -331,8 +363,12 @@ impl EndpointEngine {
 
         // Initialize subsystems
         let allowlist = Arc::new(allowlist::DeveloperAllowlist::new(config.allowlist.clone()));
-        let threat_intel = Arc::new(threat_intel::ThreatIntelDB::new(config.threat_intel.clone()));
-        let quarantine = Arc::new(file_quarantine::QuarantineVault::new(config.quarantine.clone()));
+        let threat_intel = Arc::new(threat_intel::ThreatIntelDB::new(
+            config.threat_intel.clone(),
+        ));
+        let quarantine = Arc::new(file_quarantine::QuarantineVault::new(
+            config.quarantine.clone(),
+        ));
 
         // DNS filter (if enabled)
         let dns_filter = if config.enable_dns_filter {
@@ -363,9 +399,8 @@ impl EndpointEngine {
         let container_scanner = container_scanner::ContainerScanner::new(
             container_scanner::ContainerScanConfig::default(),
         );
-        let supply_chain_scanner = supply_chain::SupplyChainScanner::new(
-            supply_chain::SupplyChainConfig::default(),
-        );
+        let supply_chain_scanner =
+            supply_chain::SupplyChainScanner::new(supply_chain::SupplyChainConfig::default());
 
         Self {
             scanners,
@@ -381,6 +416,7 @@ impl EndpointEngine {
             files_scanned: Arc::new(AtomicU64::new(0)),
             threats_detected: Arc::new(AtomicU64::new(0)),
             running: AtomicBool::new(false),
+            runtime_allowlist: runtime_allowlist::RuntimeAllowlist::new(),
         }
     }
 
@@ -400,10 +436,7 @@ impl EndpointEngine {
         // Start file watcher
         if self.config.enable_watcher {
             let (scan_tx, mut scan_rx) = tokio::sync::mpsc::unbounded_channel::<PathBuf>();
-            let watcher_handle = watcher::FileWatcher::new(
-                self.config.watcher.clone(),
-                scan_tx,
-            );
+            let watcher_handle = watcher::FileWatcher::new(self.config.watcher.clone(), scan_tx);
 
             let allowlist = Arc::clone(&self.allowlist);
             let _watcher_task = watcher_handle.start(allowlist);
@@ -513,7 +546,9 @@ impl EndpointEngine {
         // Start USB monitor
         if self.config.enable_usb_monitor {
             let (usb_tx, mut usb_rx) = tokio::sync::mpsc::unbounded_channel::<ScanResult>();
-            let usb_mon = Arc::new(usb_monitor::UsbMonitor::new(self.config.usb_monitor.clone()));
+            let usb_mon = Arc::new(usb_monitor::UsbMonitor::new(
+                self.config.usb_monitor.clone(),
+            ));
             let usb_handle = Arc::clone(&usb_mon).start(usb_tx);
             handles.push(usb_handle);
 
@@ -545,7 +580,9 @@ impl EndpointEngine {
         // Start process monitor
         if self.config.enable_process_monitor {
             let (pm_tx, mut pm_rx) = tokio::sync::mpsc::unbounded_channel::<ScanResult>();
-            let proc_mon = Arc::new(process_monitor::ProcessMonitor::new(self.config.process_monitor.clone()));
+            let proc_mon = Arc::new(process_monitor::ProcessMonitor::new(
+                self.config.process_monitor.clone(),
+            ));
             let pm_handle = Arc::clone(&proc_mon).start(pm_tx);
             handles.push(pm_handle);
 
@@ -556,10 +593,17 @@ impl EndpointEngine {
             let pm_consumer = tokio::spawn(async move {
                 while let Some(result) = pm_rx.recv().await {
                     threats_detected.fetch_add(1, Ordering::Relaxed);
-                    audit_pm.record(SecurityEventType::SuspiciousProcess, &result.target, &result.description, result.confidence);
+                    audit_pm.record(
+                        SecurityEventType::SuspiciousProcess,
+                        &result.target,
+                        &result.description,
+                        result.confidence,
+                    );
                     let _ = result_tx.send(result.clone());
                     let mut hist = history.write();
-                    if hist.len() >= 10000 { hist.pop_front(); }
+                    if hist.len() >= 10000 {
+                        hist.pop_front();
+                    }
                     hist.push_back(result);
                 }
             });
@@ -569,9 +613,10 @@ impl EndpointEngine {
         // Start network monitor
         if self.config.enable_network_monitor {
             let (nm_tx, mut nm_rx) = tokio::sync::mpsc::unbounded_channel::<ScanResult>();
-            let net_mon = Arc::new(network_monitor::NetworkMonitor::new(
+            let net_mon = Arc::new(network_monitor::NetworkMonitor::with_runtime_allowlist(
                 self.config.network_monitor.clone(),
                 Arc::clone(&self.threat_intel),
+                Arc::clone(&self.runtime_allowlist),
             ));
             let nm_handle = Arc::clone(&net_mon).start(nm_tx);
             handles.push(nm_handle);
@@ -583,10 +628,17 @@ impl EndpointEngine {
             let nm_consumer = tokio::spawn(async move {
                 while let Some(result) = nm_rx.recv().await {
                     threats_detected.fetch_add(1, Ordering::Relaxed);
-                    audit_nm.record(SecurityEventType::SuspiciousNetwork, &result.target, &result.description, result.confidence);
+                    audit_nm.record(
+                        SecurityEventType::SuspiciousNetwork,
+                        &result.target,
+                        &result.description,
+                        result.confidence,
+                    );
                     let _ = result_tx.send(result.clone());
                     let mut hist = history.write();
-                    if hist.len() >= 10000 { hist.pop_front(); }
+                    if hist.len() >= 10000 {
+                        hist.pop_front();
+                    }
                     hist.push_back(result);
                 }
             });
@@ -596,7 +648,9 @@ impl EndpointEngine {
         // Start memory scanner
         if self.config.enable_memory_scanner {
             let (ms_tx, mut ms_rx) = tokio::sync::mpsc::unbounded_channel::<ScanResult>();
-            let mem_scan = Arc::new(memory_scanner::MemoryScanner::new(self.config.memory_scanner.clone()));
+            let mem_scan = Arc::new(memory_scanner::MemoryScanner::new(
+                self.config.memory_scanner.clone(),
+            ));
             let ms_handle = Arc::clone(&mem_scan).start(ms_tx);
             handles.push(ms_handle);
 
@@ -607,10 +661,17 @@ impl EndpointEngine {
             let ms_consumer = tokio::spawn(async move {
                 while let Some(result) = ms_rx.recv().await {
                     threats_detected.fetch_add(1, Ordering::Relaxed);
-                    audit_ms.record(SecurityEventType::MemoryAnomaly, &result.target, &result.description, result.confidence);
+                    audit_ms.record(
+                        SecurityEventType::MemoryAnomaly,
+                        &result.target,
+                        &result.description,
+                        result.confidence,
+                    );
                     let _ = result_tx.send(result.clone());
                     let mut hist = history.write();
-                    if hist.len() >= 10000 { hist.pop_front(); }
+                    if hist.len() >= 10000 {
+                        hist.pop_front();
+                    }
                     hist.push_back(result);
                 }
             });
@@ -620,7 +681,9 @@ impl EndpointEngine {
         // Start rootkit detector
         if self.config.enable_rootkit_detector {
             let (rk_tx, mut rk_rx) = tokio::sync::mpsc::unbounded_channel::<ScanResult>();
-            let rk_det = Arc::new(rootkit_detector::RootkitDetector::new(self.config.rootkit_detector.clone()));
+            let rk_det = Arc::new(rootkit_detector::RootkitDetector::new(
+                self.config.rootkit_detector.clone(),
+            ));
             let rk_handle = Arc::clone(&rk_det).start(rk_tx);
             handles.push(rk_handle);
 
@@ -631,10 +694,17 @@ impl EndpointEngine {
             let rk_consumer = tokio::spawn(async move {
                 while let Some(result) = rk_rx.recv().await {
                     threats_detected.fetch_add(1, Ordering::Relaxed);
-                    audit_rk.record(SecurityEventType::RootkitIndicator, &result.target, &result.description, result.confidence);
+                    audit_rk.record(
+                        SecurityEventType::RootkitIndicator,
+                        &result.target,
+                        &result.description,
+                        result.confidence,
+                    );
                     let _ = result_tx.send(result.clone());
                     let mut hist = history.write();
-                    if hist.len() >= 10000 { hist.pop_front(); }
+                    if hist.len() >= 10000 {
+                        hist.pop_front();
+                    }
                     hist.push_back(result);
                 }
             });
@@ -715,22 +785,171 @@ impl EndpointEngine {
 
     /// Scan a directory recursively.
     pub async fn scan_dir(&self, dir: &Path) -> Vec<ScanResult> {
-        let mut results = Vec::new();
-        if let Ok(entries) = std::fs::read_dir(dir) {
+        // Bounded scan: 30-minute ceiling, max depth 20, skip symlinks, don't cross filesystem boundaries.
+        // Previous unbounded recursion could wedge forever on /proc, /sys, or symlink loops.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1800);
+        let root_dev = std::fs::metadata(dir).ok().map(|m| {
+            use std::os::unix::fs::MetadataExt;
+            m.dev()
+        });
+        self.scan_dir_bounded(dir, 0, 20, deadline, root_dev).await
+    }
+
+    fn scan_dir_bounded<'a>(
+        &'a self,
+        dir: &'a Path,
+        depth: usize,
+        max_depth: usize,
+        deadline: std::time::Instant,
+        root_dev: Option<u64>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Vec<ScanResult>> + Send + 'a>> {
+        Box::pin(async move {
+            let mut results = Vec::new();
+            if depth > max_depth || std::time::Instant::now() > deadline {
+                return results;
+            }
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return results;
+            };
             for entry in entries.flatten() {
+                if std::time::Instant::now() > deadline {
+                    break;
+                }
                 let path = entry.path();
-                if path.is_dir() {
-                    if !self.allowlist.should_skip_path(&path) {
-                        let mut r = Box::pin(self.scan_dir(&path)).await;
-                        results.append(&mut r);
+                // Reject symlinks outright — guards against loops and escapes.
+                let Ok(meta) = entry.metadata() else { continue };
+                if meta.file_type().is_symlink() {
+                    continue;
+                }
+                // Skip allowlisted paths (kernel pseudo-fs, dev dirs, etc.)
+                if self.allowlist.should_skip_path(&path) {
+                    continue;
+                }
+                if meta.is_dir() {
+                    // Don't cross filesystem boundaries (skips bind mounts, network mounts)
+                    use std::os::unix::fs::MetadataExt;
+                    if let Some(rdev) = root_dev {
+                        if meta.dev() != rdev {
+                            continue;
+                        }
                     }
-                } else if path.is_file() {
+                    let mut r = self
+                        .scan_dir_bounded(&path, depth + 1, max_depth, deadline, root_dev)
+                        .await;
+                    results.append(&mut r);
+                } else if meta.is_file() {
                     let mut r = self.scan_file(&path).await;
                     results.append(&mut r);
                 }
             }
-        }
-        results
+            results
+        })
+    }
+
+    /// Scan a directory and stream results to a JSONL file.
+    ///
+    /// Unlike `scan_dir`, this does not hold results in memory — each detection
+    /// is written to `output_path` as a line of JSON and discarded. Returns the
+    /// count of detections and the count of files scanned.
+    ///
+    /// Designed for periodic whole-filesystem scans on resource-constrained hosts.
+    pub async fn scan_dir_streaming(
+        &self,
+        dir: &Path,
+        output_path: &Path,
+    ) -> std::io::Result<ScanStreamSummary> {
+        use std::io::Write;
+        let file = std::fs::File::create(output_path)?;
+        let writer = std::sync::Arc::new(parking_lot::Mutex::new(std::io::BufWriter::new(file)));
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1800);
+        let root_dev = std::fs::metadata(dir).ok().map(|m| {
+            use std::os::unix::fs::MetadataExt;
+            m.dev()
+        });
+
+        let mut summary = ScanStreamSummary::default();
+        self.scan_dir_streaming_bounded(
+            dir,
+            0,
+            20,
+            deadline,
+            root_dev,
+            &writer,
+            &mut summary,
+        )
+        .await;
+
+        writer.lock().flush()?;
+        Ok(summary)
+    }
+
+    fn scan_dir_streaming_bounded<'a>(
+        &'a self,
+        dir: &'a Path,
+        depth: usize,
+        max_depth: usize,
+        deadline: std::time::Instant,
+        root_dev: Option<u64>,
+        writer: &'a std::sync::Arc<parking_lot::Mutex<std::io::BufWriter<std::fs::File>>>,
+        summary: &'a mut ScanStreamSummary,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+        Box::pin(async move {
+            use std::io::Write;
+            if depth > max_depth || std::time::Instant::now() > deadline {
+                if std::time::Instant::now() > deadline {
+                    summary.deadline_hit = true;
+                }
+                return;
+            }
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                if std::time::Instant::now() > deadline {
+                    summary.deadline_hit = true;
+                    break;
+                }
+                let path = entry.path();
+                let Ok(meta) = entry.metadata() else { continue };
+                if meta.file_type().is_symlink() {
+                    continue;
+                }
+                if self.allowlist.should_skip_path(&path) {
+                    continue;
+                }
+                if meta.is_dir() {
+                    use std::os::unix::fs::MetadataExt;
+                    if let Some(rdev) = root_dev {
+                        if meta.dev() != rdev {
+                            continue;
+                        }
+                    }
+                    self.scan_dir_streaming_bounded(
+                        &path,
+                        depth + 1,
+                        max_depth,
+                        deadline,
+                        root_dev,
+                        writer,
+                        summary,
+                    )
+                    .await;
+                } else if meta.is_file() {
+                    summary.files_scanned += 1;
+                    let results = self.scan_file(&path).await;
+                    if !results.is_empty() {
+                        let mut w = writer.lock();
+                        for r in &results {
+                            if let Ok(json) = serde_json::to_string(r) {
+                                let _ = writeln!(w, "{json}");
+                            }
+                            summary.detections += 1;
+                        }
+                    }
+                }
+            }
+        })
     }
 
     /// Scan a Docker image for security issues.
@@ -869,16 +1088,24 @@ mod tests {
     #[test]
     fn test_confidence_clamping() {
         let r1 = ScanResult::new(
-            "s", "t", Severity::Low,
+            "s",
+            "t",
+            Severity::Low,
             DetectionCategory::HeuristicAnomaly { rule: "x".into() },
-            "d", 1.5, RecommendedAction::LogOnly,
+            "d",
+            1.5,
+            RecommendedAction::LogOnly,
         );
         assert_eq!(r1.confidence, 1.0);
 
         let r2 = ScanResult::new(
-            "s", "t", Severity::Low,
+            "s",
+            "t",
+            Severity::Low,
             DetectionCategory::HeuristicAnomaly { rule: "x".into() },
-            "d", -0.5, RecommendedAction::LogOnly,
+            "d",
+            -0.5,
+            RecommendedAction::LogOnly,
         );
         assert_eq!(r2.confidence, 0.0);
     }

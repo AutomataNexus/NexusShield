@@ -24,11 +24,13 @@
 //! - **Input Sanitizer** — Connection string and path traversal prevention
 //! - **Threat Scoring** — Multi-signal adaptive threat assessment (0.0–1.0)
 
-pub mod auth;
 pub mod audit_chain;
+pub mod auth;
 pub mod compliance_report;
 pub mod config;
 pub mod credential_vault;
+pub mod daily_report;
+pub mod email_guard;
 pub mod endpoint;
 pub mod ferrum_integration;
 pub mod fingerprint;
@@ -43,17 +45,16 @@ pub mod signature_updater;
 pub mod sql_firewall;
 pub mod sse_events;
 pub mod ssrf_guard;
-pub mod email_guard;
 pub mod threat_score;
 pub mod webhook;
 
 use std::sync::Arc;
 
+use axum::Extension;
 use axum::extract::Request;
 use axum::http::StatusCode;
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
-use axum::Extension;
 
 pub use audit_chain::{AuditChain, AuditEvent, SecurityEventType};
 pub use config::ShieldConfig;
@@ -110,9 +111,7 @@ impl IntoResponse for ShieldError {
             Self::SqlInjectionDetected(_) => {
                 (StatusCode::FORBIDDEN, "Request blocked by security policy")
             }
-            Self::SsrfBlocked(_) => {
-                (StatusCode::FORBIDDEN, "Request blocked by security policy")
-            }
+            Self::SsrfBlocked(_) => (StatusCode::FORBIDDEN, "Request blocked by security policy"),
             Self::RateLimitExceeded { .. } => {
                 (StatusCode::TOO_MANY_REQUESTS, "Rate limit exceeded")
             }
@@ -120,27 +119,17 @@ impl IntoResponse for ShieldError {
                 (StatusCode::FORBIDDEN, "Request blocked by security policy")
             }
             Self::MaliciousInput(_) => (StatusCode::BAD_REQUEST, "Invalid input detected"),
-            Self::PathTraversal(_) => {
-                (StatusCode::FORBIDDEN, "Request blocked by security policy")
-            }
+            Self::PathTraversal(_) => (StatusCode::FORBIDDEN, "Request blocked by security policy"),
             Self::InvalidConnectionString(_) => {
                 (StatusCode::BAD_REQUEST, "Invalid connection configuration")
             }
-            Self::QuarantineFailed(_) => {
-                (StatusCode::BAD_REQUEST, "Data validation failed")
-            }
-            Self::EmailViolation(_) => {
-                (StatusCode::BAD_REQUEST, "Email validation failed")
-            }
-            Self::EmailBombing(_) => {
-                (StatusCode::TOO_MANY_REQUESTS, "Email rate limit exceeded")
-            }
+            Self::QuarantineFailed(_) => (StatusCode::BAD_REQUEST, "Data validation failed"),
+            Self::EmailViolation(_) => (StatusCode::BAD_REQUEST, "Email validation failed"),
+            Self::EmailBombing(_) => (StatusCode::TOO_MANY_REQUESTS, "Email rate limit exceeded"),
             Self::MalwareDetected(_) => {
                 (StatusCode::FORBIDDEN, "Request blocked by security policy")
             }
-            Self::EndpointError(_) => {
-                (StatusCode::INTERNAL_SERVER_ERROR, "Security engine error")
-            }
+            Self::EndpointError(_) => (StatusCode::INTERNAL_SERVER_ERROR, "Security engine error"),
             Self::QuarantineVaultError(_) => {
                 (StatusCode::INTERNAL_SERVER_ERROR, "Security engine error")
             }
@@ -202,12 +191,8 @@ impl Shield {
     /// Validate a URL through the SSRF guard.
     pub fn validate_url(&self, url: &str) -> Result<(), ShieldError> {
         ssrf_guard::validate_url(url, &self.config.ssrf).map_err(|reason| {
-            self.audit.record(
-                SecurityEventType::SsrfAttempt,
-                "api",
-                &reason,
-                0.9,
-            );
+            self.audit
+                .record(SecurityEventType::SsrfAttempt, "api", &reason, 0.9);
             ShieldError::SsrfBlocked(reason)
         })
     }
@@ -215,12 +200,8 @@ impl Shield {
     /// Validate an IP address through the SSRF guard.
     pub fn validate_ip(&self, ip: &str) -> Result<(), ShieldError> {
         ssrf_guard::validate_ip_str(ip, &self.config.ssrf).map_err(|reason| {
-            self.audit.record(
-                SecurityEventType::SsrfAttempt,
-                "api",
-                &reason,
-                0.9,
-            );
+            self.audit
+                .record(SecurityEventType::SsrfAttempt, "api", &reason, 0.9);
             ShieldError::SsrfBlocked(reason)
         })
     }
@@ -228,12 +209,8 @@ impl Shield {
     /// Validate and sanitize a database connection string.
     pub fn validate_connection_string(&self, conn_str: &str) -> Result<String, ShieldError> {
         sanitizer::validate_connection_string(conn_str).map_err(|reason| {
-            self.audit.record(
-                SecurityEventType::MaliciousPayload,
-                "api",
-                &reason,
-                0.8,
-            );
+            self.audit
+                .record(SecurityEventType::MaliciousPayload, "api", &reason, 0.8);
             ShieldError::InvalidConnectionString(reason)
         })
     }
@@ -241,12 +218,8 @@ impl Shield {
     /// Validate a file path (SQLite database path).
     pub fn validate_file_path(&self, path: &str) -> Result<(), ShieldError> {
         sanitizer::validate_file_path(path).map_err(|reason| {
-            self.audit.record(
-                SecurityEventType::PathTraversalAttempt,
-                "api",
-                &reason,
-                0.9,
-            );
+            self.audit
+                .record(SecurityEventType::PathTraversalAttempt, "api", &reason, 0.9);
             ShieldError::PathTraversal(reason)
         })
     }
@@ -263,28 +236,21 @@ impl Shield {
                 .map(|v| format!("{:?}", v))
                 .collect::<Vec<_>>()
                 .join(", ");
-            self.audit.record(
-                SecurityEventType::DataQuarantined,
-                "api",
-                &reason,
-                0.7,
-            );
+            self.audit
+                .record(SecurityEventType::DataQuarantined, "api", &reason, 0.7);
             Err(ShieldError::QuarantineFailed(reason))
         }
     }
 
     /// Validate a JSON response from an external source.
     pub fn quarantine_json(&self, json: &str) -> Result<(), ShieldError> {
-        quarantine::validate_json_response(json, self.config.quarantine.max_size_bytes)
-            .map_err(|reason| {
-                self.audit.record(
-                    SecurityEventType::DataQuarantined,
-                    "api",
-                    &reason,
-                    0.6,
-                );
+        quarantine::validate_json_response(json, self.config.quarantine.max_size_bytes).map_err(
+            |reason| {
+                self.audit
+                    .record(SecurityEventType::DataQuarantined, "api", &reason, 0.6);
                 ShieldError::MaliciousInput(reason)
-            })
+            },
+        )
     }
 
     // --- Email security methods ---
@@ -295,13 +261,13 @@ impl Shield {
         if violations.is_empty() {
             Ok(())
         } else {
-            let reason = violations.iter().map(|v| format!("{:?}", v)).collect::<Vec<_>>().join(", ");
-            self.audit.record(
-                SecurityEventType::MaliciousPayload,
-                "email",
-                &reason,
-                0.7,
-            );
+            let reason = violations
+                .iter()
+                .map(|v| format!("{:?}", v))
+                .collect::<Vec<_>>()
+                .join(", ");
+            self.audit
+                .record(SecurityEventType::MaliciousPayload, "email", &reason, 0.7);
             Err(ShieldError::EmailViolation(reason))
         }
     }
@@ -316,7 +282,11 @@ impl Shield {
         if violations.is_empty() {
             Ok(())
         } else {
-            let reason = violations.iter().map(|v| format!("{:?}", v)).collect::<Vec<_>>().join(", ");
+            let reason = violations
+                .iter()
+                .map(|v| format!("{:?}", v))
+                .collect::<Vec<_>>()
+                .join(", ");
             self.audit.record(
                 SecurityEventType::MaliciousPayload,
                 "email",
@@ -330,12 +300,18 @@ impl Shield {
     /// Validate content that will be interpolated into an HTML email template.
     pub fn validate_email_content(&self, field_name: &str, value: &str) -> Result<(), ShieldError> {
         let violations = email_guard::validate_template_content(
-            field_name, value, self.config.email.max_body_len,
+            field_name,
+            value,
+            self.config.email.max_body_len,
         );
         if violations.is_empty() {
             Ok(())
         } else {
-            let reason = violations.iter().map(|v| format!("{:?}", v)).collect::<Vec<_>>().join(", ");
+            let reason = violations
+                .iter()
+                .map(|v| format!("{:?}", v))
+                .collect::<Vec<_>>()
+                .join(", ");
             self.audit.record(
                 SecurityEventType::MaliciousPayload,
                 "email",
@@ -371,12 +347,8 @@ impl Shield {
         // Validate all fields
         email_guard::validate_outbound_email(to, subject, body_fields, &self.config.email)
             .map_err(|reason| {
-                self.audit.record(
-                    SecurityEventType::MaliciousPayload,
-                    "email",
-                    &reason,
-                    0.7,
-                );
+                self.audit
+                    .record(SecurityEventType::MaliciousPayload, "email", &reason, 0.7);
                 ShieldError::EmailViolation(reason)
             })?;
 
@@ -430,10 +402,8 @@ pub async fn shield_middleware(
         );
         let mut resp = (StatusCode::TOO_MANY_REQUESTS, "Rate limit exceeded").into_response();
         if let Some(retry_after) = rate_result.retry_after {
-            resp.headers_mut().insert(
-                "Retry-After",
-                retry_after.to_string().parse().unwrap(),
-            );
+            resp.headers_mut()
+                .insert("Retry-After", retry_after.to_string().parse().unwrap());
         }
         return resp;
     }
@@ -557,7 +527,9 @@ mod tests {
 
     #[test]
     fn shield_error_rate_limit_display() {
-        let err = ShieldError::RateLimitExceeded { retry_after: Some(60) };
+        let err = ShieldError::RateLimitExceeded {
+            retry_after: Some(60),
+        };
         assert_eq!(err.to_string(), "Rate limit exceeded");
     }
 
@@ -582,7 +554,10 @@ mod tests {
     #[test]
     fn shield_error_invalid_connection_display() {
         let err = ShieldError::InvalidConnectionString("bad string".to_string());
-        assert_eq!(err.to_string(), "Invalid connection configuration: bad string");
+        assert_eq!(
+            err.to_string(),
+            "Invalid connection configuration: bad string"
+        );
     }
 
     #[test]
@@ -594,13 +569,19 @@ mod tests {
     #[test]
     fn shield_error_email_violation_display() {
         let err = ShieldError::EmailViolation("header injection".to_string());
-        assert_eq!(err.to_string(), "Email security violation: header injection");
+        assert_eq!(
+            err.to_string(),
+            "Email security violation: header injection"
+        );
     }
 
     #[test]
     fn shield_error_email_bombing_display() {
         let err = ShieldError::EmailBombing("test@example.com".to_string());
-        assert_eq!(err.to_string(), "Email rate limit exceeded for test@example.com");
+        assert_eq!(
+            err.to_string(),
+            "Email rate limit exceeded for test@example.com"
+        );
     }
 
     // ── ShieldError -> HTTP status codes ───────────────────
@@ -696,7 +677,10 @@ mod tests {
     #[test]
     fn extract_ip_from_x_forwarded_for() {
         let mut req = Request::builder().body(axum::body::Body::empty()).unwrap();
-        req.headers_mut().insert("x-forwarded-for", HeaderValue::from_static("1.2.3.4, 5.6.7.8"));
+        req.headers_mut().insert(
+            "x-forwarded-for",
+            HeaderValue::from_static("1.2.3.4, 5.6.7.8"),
+        );
         let ip = extract_client_ip(&req);
         assert_eq!(ip, "1.2.3.4");
     }
@@ -704,7 +688,8 @@ mod tests {
     #[test]
     fn extract_ip_from_x_real_ip() {
         let mut req = Request::builder().body(axum::body::Body::empty()).unwrap();
-        req.headers_mut().insert("x-real-ip", HeaderValue::from_static("10.0.0.1"));
+        req.headers_mut()
+            .insert("x-real-ip", HeaderValue::from_static("10.0.0.1"));
         let ip = extract_client_ip(&req);
         assert_eq!(ip, "10.0.0.1");
     }
@@ -712,8 +697,10 @@ mod tests {
     #[test]
     fn extract_ip_xff_takes_precedence_over_xri() {
         let mut req = Request::builder().body(axum::body::Body::empty()).unwrap();
-        req.headers_mut().insert("x-forwarded-for", HeaderValue::from_static("1.1.1.1"));
-        req.headers_mut().insert("x-real-ip", HeaderValue::from_static("2.2.2.2"));
+        req.headers_mut()
+            .insert("x-forwarded-for", HeaderValue::from_static("1.1.1.1"));
+        req.headers_mut()
+            .insert("x-real-ip", HeaderValue::from_static("2.2.2.2"));
         let ip = extract_client_ip(&req);
         assert_eq!(ip, "1.1.1.1");
     }
@@ -728,7 +715,10 @@ mod tests {
     #[test]
     fn extract_ip_xff_trims_whitespace() {
         let mut req = Request::builder().body(axum::body::Body::empty()).unwrap();
-        req.headers_mut().insert("x-forwarded-for", HeaderValue::from_static("  3.3.3.3  , 4.4.4.4"));
+        req.headers_mut().insert(
+            "x-forwarded-for",
+            HeaderValue::from_static("  3.3.3.3  , 4.4.4.4"),
+        );
         let ip = extract_client_ip(&req);
         assert_eq!(ip, "3.3.3.3");
     }
@@ -736,7 +726,8 @@ mod tests {
     #[test]
     fn extract_ip_xri_trims_whitespace() {
         let mut req = Request::builder().body(axum::body::Body::empty()).unwrap();
-        req.headers_mut().insert("x-real-ip", HeaderValue::from_static("  5.5.5.5  "));
+        req.headers_mut()
+            .insert("x-real-ip", HeaderValue::from_static("  5.5.5.5  "));
         let ip = extract_client_ip(&req);
         assert_eq!(ip, "5.5.5.5");
     }

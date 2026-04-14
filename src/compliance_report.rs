@@ -23,6 +23,26 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 
+/// Thread-safe compliance reporter — holds a shared reference to the audit chain.
+pub struct ComplianceReporter {
+    audit: Arc<AuditChain>,
+    config: ReportConfig,
+}
+
+impl ComplianceReporter {
+    pub fn new(audit: Arc<AuditChain>, config: ReportConfig) -> Self {
+        Self { audit, config }
+    }
+
+    pub fn summary(&self) -> ReportSummary {
+        generate_summary(&self.audit)
+    }
+
+    pub fn html_report(&self, modules: &[String], shield_config: &serde_json::Value) -> String {
+        generate_html_report(&self.audit, &self.config, modules, shield_config)
+    }
+}
+
 /// Configuration for report generation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReportConfig {
@@ -66,7 +86,8 @@ pub struct ReportSummary {
 
 /// Generate a compliance report summary from the audit chain.
 pub fn generate_summary(audit: &AuditChain) -> ReportSummary {
-    let events = audit.recent(10000);
+    let now: DateTime<Utc> = Utc::now();
+    let events: Vec<AuditEvent> = audit.recent(10000);
     let chain_valid = audit.verify_chain().valid;
 
     let mut by_type: HashMap<String, usize> = HashMap::new();
@@ -102,7 +123,7 @@ pub fn generate_summary(audit: &AuditChain) -> ReportSummary {
     top_ips.truncate(10);
 
     ReportSummary {
-        generated_at: Utc::now().to_rfc3339(),
+        generated_at: now.to_rfc3339(),
         report_period: format!("Last {} events", events.len()),
         total_events: events.len(),
         chain_valid,
@@ -135,7 +156,7 @@ pub fn generate_html_report(
     shield_config: &serde_json::Value,
 ) -> String {
     let summary = generate_summary(audit);
-    let events = audit.recent(config.max_events);
+    let events: Vec<AuditEvent> = audit.recent(config.max_events);
 
     let events_html = if config.include_event_details {
         events
@@ -284,8 +305,16 @@ pub fn generate_html_report(
         sql_inj = summary.sql_injection_count,
         ssrf = summary.ssrf_count,
         malware = summary.malware_count,
-        chain_class = if summary.chain_valid { "chain-valid" } else { "chain-invalid" },
-        chain_status = if summary.chain_valid { "VERIFIED — SHA-256 hash chain is intact" } else { "FAILED — Chain tampering detected!" },
+        chain_class = if summary.chain_valid {
+            "chain-valid"
+        } else {
+            "chain-invalid"
+        },
+        chain_status = if summary.chain_valid {
+            "VERIFIED — SHA-256 hash chain is intact"
+        } else {
+            "FAILED — Chain tampering detected!"
+        },
         severity_html = severity_html,
         modules_html = modules_html,
         config_json = html_escape(&serde_json::to_string_pretty(shield_config).unwrap_or_default()),
@@ -355,9 +384,24 @@ mod tests {
     #[test]
     fn summary_with_events() {
         let audit = AuditChain::new();
-        audit.record(SecurityEventType::RequestBlocked, "1.2.3.4", "test blocked", 0.85);
-        audit.record(SecurityEventType::SqlInjectionAttempt, "1.2.3.4", "UNION attack", 0.95);
-        audit.record(SecurityEventType::RateLimitHit, "5.6.7.8", "rate limit", 0.8);
+        audit.record(
+            SecurityEventType::RequestBlocked,
+            "1.2.3.4",
+            "test blocked",
+            0.85,
+        );
+        audit.record(
+            SecurityEventType::SqlInjectionAttempt,
+            "1.2.3.4",
+            "UNION attack",
+            0.95,
+        );
+        audit.record(
+            SecurityEventType::RateLimitHit,
+            "5.6.7.8",
+            "rate limit",
+            0.8,
+        );
 
         let summary = generate_summary(&audit);
         assert_eq!(summary.total_events, 3);
@@ -387,7 +431,7 @@ mod tests {
         let audit = AuditChain::new();
         audit.record(SecurityEventType::RequestBlocked, "x", "test", 0.95); // Critical
         audit.record(SecurityEventType::RequestBlocked, "x", "test", 0.75); // High
-        audit.record(SecurityEventType::RequestBlocked, "x", "test", 0.5);  // Medium
+        audit.record(SecurityEventType::RequestBlocked, "x", "test", 0.5); // Medium
 
         let summary = generate_summary(&audit);
         assert_eq!(summary.events_by_severity.get("Critical"), Some(&1));
@@ -437,7 +481,10 @@ mod tests {
 
     #[test]
     fn html_escape_works() {
-        assert_eq!(html_escape("<script>alert('xss')</script>"), "&lt;script&gt;alert('xss')&lt;/script&gt;");
+        assert_eq!(
+            html_escape("<script>alert('xss')</script>"),
+            "&lt;script&gt;alert('xss')&lt;/script&gt;"
+        );
         assert_eq!(html_escape("normal text"), "normal text");
         assert_eq!(html_escape("a & b"), "a &amp; b");
     }

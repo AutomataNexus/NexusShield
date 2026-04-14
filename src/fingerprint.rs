@@ -123,7 +123,10 @@ impl Fingerprinter {
         let mut score: f64 = 0.0;
 
         // High request rate
-        let duration = behavior.last_seen.duration_since(behavior.first_seen).as_secs_f64();
+        let duration = behavior
+            .last_seen
+            .duration_since(behavior.first_seen)
+            .as_secs_f64();
         if duration > 0.0 {
             let rps = behavior.request_count as f64 / duration;
             if rps > 20.0 {
@@ -223,9 +226,20 @@ fn calculate_anomaly_score(signals: &FingerprintSignals) -> f64 {
     // Check for known attack tool user agents
     let ua_lower = signals.user_agent.to_lowercase();
     let attack_tools = [
-        "sqlmap", "nikto", "nmap", "masscan", "zgrab", "gobuster",
-        "dirbuster", "wfuzz", "ffuf", "nuclei", "httpx",
-        "python-requests", "go-http-client", "java/",
+        "sqlmap",
+        "nikto",
+        "nmap",
+        "masscan",
+        "zgrab",
+        "gobuster",
+        "dirbuster",
+        "wfuzz",
+        "ffuf",
+        "nuclei",
+        "httpx",
+        "python-requests",
+        "go-http-client",
+        "java/",
     ];
     for tool in &attack_tools {
         if ua_lower.contains(tool) {
@@ -261,10 +275,22 @@ mod tests {
 
     fn make_normal_headers() -> HeaderMap {
         let mut h = HeaderMap::new();
-        h.insert("user-agent", HeaderValue::from_static("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"));
-        h.insert("accept", HeaderValue::from_static("text/html,application/json"));
-        h.insert("accept-language", HeaderValue::from_static("en-US,en;q=0.9"));
-        h.insert("accept-encoding", HeaderValue::from_static("gzip, deflate, br"));
+        h.insert(
+            "user-agent",
+            HeaderValue::from_static("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"),
+        );
+        h.insert(
+            "accept",
+            HeaderValue::from_static("text/html,application/json"),
+        );
+        h.insert(
+            "accept-language",
+            HeaderValue::from_static("en-US,en;q=0.9"),
+        );
+        h.insert(
+            "accept-encoding",
+            HeaderValue::from_static("gzip, deflate, br"),
+        );
         h
     }
 
@@ -278,21 +304,33 @@ mod tests {
     fn normal_browser_low_anomaly() {
         let fp = Fingerprinter::new();
         let result = fp.analyze(&make_normal_headers());
-        assert!(result.anomaly_score < 0.2, "Normal browser score should be low: {}", result.anomaly_score);
+        assert!(
+            result.anomaly_score < 0.2,
+            "Normal browser score should be low: {}",
+            result.anomaly_score
+        );
     }
 
     #[test]
     fn attack_tool_high_anomaly() {
         let fp = Fingerprinter::new();
         let result = fp.analyze(&make_bot_headers());
-        assert!(result.anomaly_score > 0.5, "Attack tool score should be high: {}", result.anomaly_score);
+        assert!(
+            result.anomaly_score > 0.5,
+            "Attack tool score should be high: {}",
+            result.anomaly_score
+        );
     }
 
     #[test]
     fn empty_headers_suspicious() {
         let fp = Fingerprinter::new();
         let result = fp.analyze(&HeaderMap::new());
-        assert!(result.anomaly_score > 0.4, "Empty headers should be suspicious: {}", result.anomaly_score);
+        assert!(
+            result.anomaly_score > 0.4,
+            "Empty headers should be suspicious: {}",
+            result.anomaly_score
+        );
     }
 
     #[test]
@@ -323,19 +361,30 @@ mod tests {
         let result = fp.analyze(&h);
         // Has user-agent but missing accept, accept-language, accept-encoding
         // and low header count (1 < 3) => should have moderate score
-        assert!(result.anomaly_score > 0.2, "Single header should be suspicious: {}", result.anomaly_score);
+        assert!(
+            result.anomaly_score > 0.2,
+            "Single header should be suspicious: {}",
+            result.anomaly_score
+        );
     }
 
     #[test]
     fn analyze_python_requests_user_agent() {
         let fp = Fingerprinter::new();
         let mut h = HeaderMap::new();
-        h.insert("user-agent", HeaderValue::from_static("python-requests/2.28.1"));
+        h.insert(
+            "user-agent",
+            HeaderValue::from_static("python-requests/2.28.1"),
+        );
         h.insert("accept", HeaderValue::from_static("*/*"));
         h.insert("accept-encoding", HeaderValue::from_static("gzip"));
         let result = fp.analyze(&h);
         // python-requests is in the attack tools list
-        assert!(result.anomaly_score >= 0.4, "python-requests UA should be flagged: {}", result.anomaly_score);
+        assert!(
+            result.anomaly_score >= 0.4,
+            "python-requests UA should be flagged: {}",
+            result.anomaly_score
+        );
     }
 
     #[test]
@@ -344,7 +393,11 @@ mod tests {
         let mut h = HeaderMap::new();
         h.insert("user-agent", HeaderValue::from_static("Go-http-client/1.1"));
         let result = fp.analyze(&h);
-        assert!(result.anomaly_score >= 0.4, "Go http client should be flagged: {}", result.anomaly_score);
+        assert!(
+            result.anomaly_score >= 0.4,
+            "Go http client should be flagged: {}",
+            result.anomaly_score
+        );
     }
 
     #[test]
@@ -353,17 +406,28 @@ mod tests {
         let mut h = HeaderMap::new();
         h.insert("user-agent", HeaderValue::from_static("Nikto/2.1.6"));
         let result = fp.analyze(&h);
-        assert!(result.anomaly_score >= 0.4, "Nikto should be flagged: {}", result.anomaly_score);
+        assert!(
+            result.anomaly_score >= 0.4,
+            "Nikto should be flagged: {}",
+            result.anomaly_score
+        );
     }
 
     #[test]
     fn analyze_nuclei_scanner() {
         let fp = Fingerprinter::new();
         let mut h = HeaderMap::new();
-        h.insert("user-agent", HeaderValue::from_static("Nuclei - Open-source project"));
+        h.insert(
+            "user-agent",
+            HeaderValue::from_static("Nuclei - Open-source project"),
+        );
         h.insert("accept", HeaderValue::from_static("*/*"));
         let result = fp.analyze(&h);
-        assert!(result.anomaly_score >= 0.4, "Nuclei should be flagged: {}", result.anomaly_score);
+        assert!(
+            result.anomaly_score >= 0.4,
+            "Nuclei should be flagged: {}",
+            result.anomaly_score
+        );
     }
 
     #[test]
@@ -383,7 +447,11 @@ mod tests {
             );
         }
         let result = fp.analyze(&h);
-        assert!(result.anomaly_score > 0.0, "Many headers should add some anomaly: {}", result.anomaly_score);
+        assert!(
+            result.anomaly_score > 0.0,
+            "Many headers should add some anomaly: {}",
+            result.anomaly_score
+        );
     }
 
     #[test]
@@ -438,7 +506,11 @@ mod tests {
         // because requests are spread out in time
         let score = fp.behavioral_score("10.0.0.1");
         // With only 3 requests, score should be 0 or very low
-        assert!(score < 1.0, "Few requests should not max out score: {}", score);
+        assert!(
+            score < 1.0,
+            "Few requests should not max out score: {}",
+            score
+        );
     }
 
     #[test]
@@ -485,7 +557,11 @@ mod tests {
         }
         let score = fp.behavioral_score("error_client");
         // With 10 requests and 8 errors, error_rate = 0.8 > 0.5 => +0.3
-        assert!(score >= 0.3, "High error rate should increase behavioral score: {}", score);
+        assert!(
+            score >= 0.3,
+            "High error rate should increase behavioral score: {}",
+            score
+        );
     }
 
     // ── behavioral_score() thresholds ──────────────────────

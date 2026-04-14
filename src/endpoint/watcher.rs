@@ -11,8 +11,8 @@ use super::allowlist::DeveloperAllowlist;
 use notify::{Event, EventKind, RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Configuration for the filesystem watcher.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -109,10 +109,8 @@ impl FileWatcher {
                 match rx.recv_timeout(std::time::Duration::from_secs(1)) {
                     Ok(Ok(event)) => {
                         // Only process create and modify events
-                        let dominated = matches!(
-                            event.kind,
-                            EventKind::Create(_) | EventKind::Modify(_)
-                        );
+                        let dominated =
+                            matches!(event.kind, EventKind::Create(_) | EventKind::Modify(_));
 
                         if !dominated {
                             continue;
@@ -250,10 +248,7 @@ mod tests {
             Path::new("/home/user/Documents/report.pdf"),
             &patterns
         ));
-        assert!(!should_exclude(
-            Path::new("/tmp/download.exe"),
-            &patterns
-        ));
+        assert!(!should_exclude(Path::new("/tmp/download.exe"), &patterns));
     }
 
     #[test]

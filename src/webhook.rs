@@ -88,7 +88,8 @@ fn format_generic(event: &AuditEvent) -> String {
         "details": event.details,
         "timestamp": event.timestamp.to_rfc3339(),
         "event_id": event.id,
-    }).to_string()
+    })
+    .to_string()
 }
 
 fn score_label(score: f64) -> &'static str {
@@ -106,9 +107,8 @@ async fn send_webhook(
     body: &str,
     extra_headers: &[(String, String)],
 ) -> Result<(), String> {
-    let client = hyper_util::client::legacy::Client::builder(
-        hyper_util::rt::TokioExecutor::new(),
-    ).build_http::<axum::body::Body>();
+    let client = hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new())
+        .build_http::<axum::body::Body>();
 
     let uri: hyper::Uri = url.parse().map_err(|e| format!("bad webhook URL: {}", e))?;
 
@@ -165,7 +165,12 @@ mod tests {
         let event = test_event(0.75);
         let payload = format_discord(&event);
         let parsed: serde_json::Value = serde_json::from_str(&payload).unwrap();
-        assert!(parsed["embeds"][0]["title"].as_str().unwrap().contains("HIGH"));
+        assert!(
+            parsed["embeds"][0]["title"]
+                .as_str()
+                .unwrap()
+                .contains("HIGH")
+        );
     }
 
     #[test]

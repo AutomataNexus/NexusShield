@@ -32,7 +32,11 @@ pub enum QuarantineViolation {
     /// Dataset exceeds maximum column count.
     TooManyColumns { actual: usize, max: usize },
     /// Cell contains formula injection character (=, +, -, @).
-    FormulaInjection { row: usize, col: usize, prefix: char },
+    FormulaInjection {
+        row: usize,
+        col: usize,
+        prefix: char,
+    },
     /// Cell contains embedded script (<script>, javascript:, etc.).
     EmbeddedScript { row: usize, col: usize },
     /// Content contains null bytes.
@@ -196,7 +200,11 @@ mod tests {
     fn allows_normal_csv() {
         let csv = "timestamp,temperature,humidity\n2026-01-01,72.5,45.2\n2026-01-02,71.8,46.1\n";
         let result = validate_csv(csv, &default_config());
-        assert!(result.passed, "Normal CSV should pass: {:?}", result.violations);
+        assert!(
+            result.passed,
+            "Normal CSV should pass: {:?}",
+            result.violations
+        );
     }
 
     #[test]
@@ -211,7 +219,12 @@ mod tests {
         let csv = "name,value\n=CMD('calc'),100\n";
         let result = validate_csv(csv, &default_config());
         assert!(!result.passed);
-        assert!(result.violations.iter().any(|v| matches!(v, QuarantineViolation::FormulaInjection { .. })));
+        assert!(
+            result
+                .violations
+                .iter()
+                .any(|v| matches!(v, QuarantineViolation::FormulaInjection { .. }))
+        );
     }
 
     #[test]
@@ -219,7 +232,12 @@ mod tests {
         let csv = "name,value\n<script>alert('xss')</script>,100\n";
         let result = validate_csv(csv, &default_config());
         assert!(!result.passed);
-        assert!(result.violations.iter().any(|v| matches!(v, QuarantineViolation::EmbeddedScript { .. })));
+        assert!(
+            result
+                .violations
+                .iter()
+                .any(|v| matches!(v, QuarantineViolation::EmbeddedScript { .. }))
+        );
     }
 
     #[test]

@@ -23,8 +23,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 // =============================================================================
 // Configuration
@@ -120,11 +120,21 @@ pub struct FileEntry {
 /// Type of change detected.
 #[derive(Debug, Clone, PartialEq)]
 pub enum FimChange {
-    Modified { field: String, old: String, new: String },
+    Modified {
+        field: String,
+        old: String,
+        new: String,
+    },
     Created,
     Deleted,
-    PermissionChanged { old_mode: u32, new_mode: u32 },
-    OwnerChanged { old_uid: u32, new_uid: u32 },
+    PermissionChanged {
+        old_mode: u32,
+        new_mode: u32,
+    },
+    OwnerChanged {
+        old_uid: u32,
+        new_uid: u32,
+    },
 }
 
 // =============================================================================
@@ -393,8 +403,11 @@ impl FimMonitor {
     fn severity_for_path(path: &str) -> Severity {
         // Critical system files
         let critical = [
-            "/etc/passwd", "/etc/shadow", "/etc/sudoers",
-            "/etc/ssh/sshd_config", "/etc/pam.d/",
+            "/etc/passwd",
+            "/etc/shadow",
+            "/etc/sudoers",
+            "/etc/ssh/sshd_config",
+            "/etc/pam.d/",
             "/etc/ld.so.preload",
         ];
         if critical.iter().any(|c| path.starts_with(c)) {
@@ -402,8 +415,10 @@ impl FimMonitor {
         }
 
         // System binaries
-        if path.starts_with("/usr/bin/") || path.starts_with("/usr/sbin/")
-            || path.starts_with("/bin/") || path.starts_with("/sbin/")
+        if path.starts_with("/usr/bin/")
+            || path.starts_with("/usr/sbin/")
+            || path.starts_with("/bin/")
+            || path.starts_with("/sbin/")
         {
             return Severity::High;
         }
@@ -469,8 +484,7 @@ impl FimMonitor {
         let interval_ms = self.config.poll_interval_ms;
 
         tokio::spawn(async move {
-            let mut interval =
-                tokio::time::interval(std::time::Duration::from_millis(interval_ms));
+            let mut interval = tokio::time::interval(std::time::Duration::from_millis(interval_ms));
 
             while running.load(Ordering::Relaxed) {
                 interval.tick().await;
@@ -530,7 +544,10 @@ mod tests {
         fs::write(&path, "hello world").unwrap();
         let hash = FimMonitor::hash_file(&path).unwrap();
         // SHA-256 of "hello world"
-        assert_eq!(hash, "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9");
+        assert_eq!(
+            hash,
+            "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
+        );
         let _ = fs::remove_file(&path);
     }
 
@@ -647,25 +664,43 @@ mod tests {
 
     #[test]
     fn severity_for_critical_files() {
-        assert_eq!(FimMonitor::severity_for_path("/etc/passwd"), Severity::Critical);
-        assert_eq!(FimMonitor::severity_for_path("/etc/shadow"), Severity::Critical);
-        assert_eq!(FimMonitor::severity_for_path("/etc/sudoers"), Severity::Critical);
+        assert_eq!(
+            FimMonitor::severity_for_path("/etc/passwd"),
+            Severity::Critical
+        );
+        assert_eq!(
+            FimMonitor::severity_for_path("/etc/shadow"),
+            Severity::Critical
+        );
+        assert_eq!(
+            FimMonitor::severity_for_path("/etc/sudoers"),
+            Severity::Critical
+        );
     }
 
     #[test]
     fn severity_for_binaries() {
         assert_eq!(FimMonitor::severity_for_path("/usr/bin/ls"), Severity::High);
-        assert_eq!(FimMonitor::severity_for_path("/usr/sbin/sshd"), Severity::High);
+        assert_eq!(
+            FimMonitor::severity_for_path("/usr/sbin/sshd"),
+            Severity::High
+        );
     }
 
     #[test]
     fn severity_for_config() {
-        assert_eq!(FimMonitor::severity_for_path("/etc/hostname"), Severity::Medium);
+        assert_eq!(
+            FimMonitor::severity_for_path("/etc/hostname"),
+            Severity::Medium
+        );
     }
 
     #[test]
     fn severity_for_other() {
-        assert_eq!(FimMonitor::severity_for_path("/home/user/file"), Severity::Low);
+        assert_eq!(
+            FimMonitor::severity_for_path("/home/user/file"),
+            Severity::Low
+        );
     }
 
     #[test]

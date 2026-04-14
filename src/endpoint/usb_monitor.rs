@@ -21,8 +21,8 @@ use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 // =============================================================================
 // Configuration
@@ -235,7 +235,10 @@ impl UsbMonitor {
     }
 
     /// Check a mounted volume for suspicious files (autorun, hidden executables).
-    pub fn check_mount_for_threats(mount_point: &Path, autorun_names: &[String]) -> Vec<ScanResult> {
+    pub fn check_mount_for_threats(
+        mount_point: &Path,
+        autorun_names: &[String],
+    ) -> Vec<ScanResult> {
         let mut results = Vec::new();
 
         let entries = match std::fs::read_dir(mount_point) {
@@ -343,7 +346,9 @@ impl UsbMonitor {
             let info = Self::read_device_info(dev_name);
 
             // Cache device info
-            self.device_info.write().insert(dev_name.clone(), info.clone());
+            self.device_info
+                .write()
+                .insert(dev_name.clone(), info.clone());
 
             if self.config.alert_on_insertion {
                 let severity = if info.removable {
@@ -418,17 +423,15 @@ impl UsbMonitor {
             }
 
             // Check mount point for autorun and suspicious files
-            let mount_path = Path::new(&mount.mount_point);
+            let mount_path: PathBuf = PathBuf::from(&mount.mount_point);
             let mut mount_threats =
-                Self::check_mount_for_threats(mount_path, &self.config.autorun_filenames);
+                Self::check_mount_for_threats(&mount_path, &self.config.autorun_filenames);
             results.append(&mut mount_threats);
         }
 
         // Update known mounts
-        let mount_points: HashSet<String> = current_mounts
-            .into_iter()
-            .map(|m| m.mount_point)
-            .collect();
+        let mount_points: HashSet<String> =
+            current_mounts.into_iter().map(|m| m.mount_point).collect();
         *self.known_mounts.write() = mount_points;
 
         results
@@ -458,8 +461,7 @@ impl UsbMonitor {
         let interval_ms = self.config.poll_interval_ms;
 
         tokio::spawn(async move {
-            let mut interval =
-                tokio::time::interval(std::time::Duration::from_millis(interval_ms));
+            let mut interval = tokio::time::interval(std::time::Duration::from_millis(interval_ms));
 
             while running.load(Ordering::Relaxed) {
                 interval.tick().await;
@@ -651,7 +653,10 @@ proc /proc proc rw,nosuid 0 0"#;
         let autorun_names = vec!["autorun.inf".to_string()];
         let results = UsbMonitor::check_mount_for_threats(&dir, &autorun_names);
 
-        assert!(!results.is_empty(), "Should detect AUTORUN.INF (case-insensitive)");
+        assert!(
+            !results.is_empty(),
+            "Should detect AUTORUN.INF (case-insensitive)"
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }

@@ -13,9 +13,9 @@
 //! Covers: header injection (CRLF), email bombing, HTML/template injection,
 //! address validation, recipient abuse, content weaponization.
 
+use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::time::Instant;
-use parking_lot::Mutex;
 
 /// Result of email guard validation.
 #[derive(Debug)]
@@ -40,7 +40,11 @@ pub enum EmailViolation {
     /// HTML/script injection in template parameters
     ContentInjection(String),
     /// Oversized field (subject, body, etc.)
-    OversizedField { field: String, len: usize, max: usize },
+    OversizedField {
+        field: String,
+        len: usize,
+        max: usize,
+    },
     /// Encoded attack payload (base64, unicode confusables)
     EncodedPayload(String),
 }
@@ -163,9 +167,10 @@ pub fn validate_email_address(addr: &str, config: &EmailGuardConfig) -> Vec<Emai
     // Basic format check (must have exactly one @, non-empty local and domain)
     let parts: Vec<&str> = addr.splitn(2, '@').collect();
     if parts.len() != 2 || parts[0].is_empty() || parts[1].is_empty() {
-        violations.push(EmailViolation::InvalidAddress(
-            format!("Invalid email format: {}", truncate(addr, 50)),
-        ));
+        violations.push(EmailViolation::InvalidAddress(format!(
+            "Invalid email format: {}",
+            truncate(addr, 50)
+        )));
         return violations;
     }
 
@@ -195,9 +200,10 @@ pub fn validate_email_address(addr: &str, config: &EmailGuardConfig) -> Vec<Emai
     // Check blocked domains
     for blocked in &config.blocked_domains {
         if domain == *blocked || domain.ends_with(&format!(".{}", blocked)) {
-            violations.push(EmailViolation::BlockedDomain(
-                format!("Email domain '{}' is blocked", domain),
-            ));
+            violations.push(EmailViolation::BlockedDomain(format!(
+                "Email domain '{}' is blocked",
+                domain
+            )));
             break;
         }
     }
@@ -218,16 +224,18 @@ pub fn validate_header_field(field_name: &str, value: &str, max_len: usize) -> V
 
     // CRLF injection (the primary email header attack vector)
     if has_crlf(value) {
-        violations.push(EmailViolation::HeaderInjection(
-            format!("'{}' contains newline characters (header injection)", field_name),
-        ));
+        violations.push(EmailViolation::HeaderInjection(format!(
+            "'{}' contains newline characters (header injection)",
+            field_name
+        )));
     }
 
     // Null bytes
     if value.contains('\0') {
-        violations.push(EmailViolation::HeaderInjection(
-            format!("'{}' contains null byte", field_name),
-        ));
+        violations.push(EmailViolation::HeaderInjection(format!(
+            "'{}' contains null byte",
+            field_name
+        )));
     }
 
     // Length
@@ -241,9 +249,10 @@ pub fn validate_header_field(field_name: &str, value: &str, max_len: usize) -> V
 
     // Check for encoded attack payloads in header fields
     if has_encoded_attacks(value) {
-        violations.push(EmailViolation::EncodedPayload(
-            format!("'{}' contains suspicious encoded content", field_name),
-        ));
+        violations.push(EmailViolation::EncodedPayload(format!(
+            "'{}' contains suspicious encoded content",
+            field_name
+        )));
     }
 
     violations
@@ -251,7 +260,11 @@ pub fn validate_header_field(field_name: &str, value: &str, max_len: usize) -> V
 
 /// Validate content that will be interpolated into HTML templates.
 /// Prevents XSS-in-email and template injection.
-pub fn validate_template_content(field_name: &str, value: &str, max_len: usize) -> Vec<EmailViolation> {
+pub fn validate_template_content(
+    field_name: &str,
+    value: &str,
+    max_len: usize,
+) -> Vec<EmailViolation> {
     let mut violations = Vec::new();
 
     // Length check
@@ -295,9 +308,10 @@ pub fn validate_template_content(field_name: &str, value: &str, max_len: usize) 
 
     for pattern in &injection_patterns {
         if lower.contains(pattern) {
-            violations.push(EmailViolation::ContentInjection(
-                format!("'{}' contains prohibited HTML/script content", field_name),
-            ));
+            violations.push(EmailViolation::ContentInjection(format!(
+                "'{}' contains prohibited HTML/script content",
+                field_name
+            )));
             break;
         }
     }
@@ -305,9 +319,10 @@ pub fn validate_template_content(field_name: &str, value: &str, max_len: usize) 
     // CRLF in body is less critical but still flag it for content fields
     // that will appear in HTML (could break email structure)
     if has_crlf(value) && field_name != "message" && field_name != "response_body" {
-        violations.push(EmailViolation::HeaderInjection(
-            format!("'{}' contains newline characters", field_name),
-        ));
+        violations.push(EmailViolation::HeaderInjection(format!(
+            "'{}' contains newline characters",
+            field_name
+        )));
     }
 
     violations
@@ -353,7 +368,11 @@ pub fn validate_outbound_email(
     }
 
     // Validate subject
-    all_violations.extend(validate_header_field("subject", subject, config.max_subject_len));
+    all_violations.extend(validate_header_field(
+        "subject",
+        subject,
+        config.max_subject_len,
+    ));
 
     // Validate body fields
     for (name, value) in body_fields {
@@ -383,10 +402,10 @@ fn has_encoded_attacks(s: &str) -> bool {
     // PHNjcmlwdD4= is base64 for "<script>"
     // amF2YXNjcmlwdDo= is base64 for "javascript:"
     let b64_patterns = [
-        "phnjcmlwdd4",   // <script>
+        "phnjcmlwdd4",     // <script>
         "amf2yxnjcmlwddo", // javascript:
-        "phn2zw",        // <svg
-        "pgfszxj0k",     // >alert(
+        "phn2zw",          // <svg
+        "pgfszxj0k",       // >alert(
     ];
     for pattern in &b64_patterns {
         if lower.contains(pattern) {
@@ -400,7 +419,11 @@ fn has_encoded_attacks(s: &str) -> bool {
     }
 
     // Zero-width characters (can hide content)
-    if s.contains('\u{200B}') || s.contains('\u{FEFF}') || s.contains('\u{200C}') || s.contains('\u{200D}') {
+    if s.contains('\u{200B}')
+        || s.contains('\u{FEFF}')
+        || s.contains('\u{200C}')
+        || s.contains('\u{200D}')
+    {
         return true;
     }
 
@@ -455,19 +478,28 @@ mod tests {
     #[test]
     fn blocks_disposable_domain() {
         let v = validate_email_address("user@mailinator.com", &config());
-        assert!(v.iter().any(|v| matches!(v, EmailViolation::BlockedDomain(_))));
+        assert!(
+            v.iter()
+                .any(|v| matches!(v, EmailViolation::BlockedDomain(_)))
+        );
     }
 
     #[test]
     fn blocks_localhost_domain() {
         let v = validate_email_address("admin@localhost", &config());
-        assert!(v.iter().any(|v| matches!(v, EmailViolation::BlockedDomain(_))));
+        assert!(
+            v.iter()
+                .any(|v| matches!(v, EmailViolation::BlockedDomain(_)))
+        );
     }
 
     #[test]
     fn blocks_ip_domain() {
         let v = validate_email_address("admin@[127.0.0.1]", &config());
-        assert!(v.iter().any(|v| matches!(v, EmailViolation::BlockedDomain(_))));
+        assert!(
+            v.iter()
+                .any(|v| matches!(v, EmailViolation::BlockedDomain(_)))
+        );
     }
 
     // ─── Header injection ───────────────────────────
@@ -475,20 +507,29 @@ mod tests {
     #[test]
     fn blocks_crlf_in_subject() {
         let v = validate_header_field("subject", "Hello\r\nBcc: hacker@evil.com", 200);
-        assert!(v.iter().any(|v| matches!(v, EmailViolation::HeaderInjection(_))));
+        assert!(
+            v.iter()
+                .any(|v| matches!(v, EmailViolation::HeaderInjection(_)))
+        );
     }
 
     #[test]
     fn blocks_newline_in_name() {
         let v = validate_header_field("username", "John\nBcc: hack@evil.com", 100);
-        assert!(v.iter().any(|v| matches!(v, EmailViolation::HeaderInjection(_))));
+        assert!(
+            v.iter()
+                .any(|v| matches!(v, EmailViolation::HeaderInjection(_)))
+        );
     }
 
     #[test]
     fn blocks_oversized_subject() {
         let long = "A".repeat(300);
         let v = validate_header_field("subject", &long, 200);
-        assert!(v.iter().any(|v| matches!(v, EmailViolation::OversizedField { .. })));
+        assert!(
+            v.iter()
+                .any(|v| matches!(v, EmailViolation::OversizedField { .. }))
+        );
     }
 
     // ─── Template injection ─────────────────────────
@@ -496,30 +537,43 @@ mod tests {
     #[test]
     fn blocks_script_in_content() {
         let v = validate_template_content("message", "Hello <script>alert('xss')</script>", 10000);
-        assert!(v.iter().any(|v| matches!(v, EmailViolation::ContentInjection(_))));
+        assert!(
+            v.iter()
+                .any(|v| matches!(v, EmailViolation::ContentInjection(_)))
+        );
     }
 
     #[test]
     fn blocks_javascript_protocol() {
         let v = validate_template_content("message", "Click javascript:alert(1)", 10000);
-        assert!(v.iter().any(|v| matches!(v, EmailViolation::ContentInjection(_))));
+        assert!(
+            v.iter()
+                .any(|v| matches!(v, EmailViolation::ContentInjection(_)))
+        );
     }
 
     #[test]
     fn blocks_event_handlers() {
         let v = validate_template_content("message", "<img onerror=alert(1) src=x>", 10000);
-        assert!(v.iter().any(|v| matches!(v, EmailViolation::ContentInjection(_))));
+        assert!(
+            v.iter()
+                .any(|v| matches!(v, EmailViolation::ContentInjection(_)))
+        );
     }
 
     #[test]
     fn blocks_svg_injection() {
         let v = validate_template_content("message", "<svg onload=fetch('evil.com')>", 10000);
-        assert!(v.iter().any(|v| matches!(v, EmailViolation::ContentInjection(_))));
+        assert!(
+            v.iter()
+                .any(|v| matches!(v, EmailViolation::ContentInjection(_)))
+        );
     }
 
     #[test]
     fn allows_normal_text_content() {
-        let v = validate_template_content("message", "Hello, this is a normal support message!", 10000);
+        let v =
+            validate_template_content("message", "Hello, this is a normal support message!", 10000);
         assert!(v.is_empty());
     }
 
@@ -528,13 +582,19 @@ mod tests {
     #[test]
     fn blocks_unicode_bidi_override() {
         let v = validate_header_field("username", "normal\u{202E}txe.exe", 100);
-        assert!(v.iter().any(|v| matches!(v, EmailViolation::EncodedPayload(_))));
+        assert!(
+            v.iter()
+                .any(|v| matches!(v, EmailViolation::EncodedPayload(_)))
+        );
     }
 
     #[test]
     fn blocks_zero_width_chars() {
         let v = validate_header_field("username", "adm\u{200B}in", 100);
-        assert!(v.iter().any(|v| matches!(v, EmailViolation::EncodedPayload(_))));
+        assert!(
+            v.iter()
+                .any(|v| matches!(v, EmailViolation::EncodedPayload(_)))
+        );
     }
 
     // ─── HTML escaping ──────────────────────────────
@@ -574,12 +634,7 @@ mod tests {
     fn rejects_too_many_recipients() {
         let addrs: Vec<String> = (0..15).map(|i| format!("user{}@example.com", i)).collect();
         let refs: Vec<&str> = addrs.iter().map(|s| s.as_str()).collect();
-        let result = validate_outbound_email(
-            &refs,
-            "Hi",
-            &[],
-            &config(),
-        );
+        let result = validate_outbound_email(&refs, "Hi", &[], &config());
         assert!(result.is_err());
     }
 

@@ -28,10 +28,10 @@
 //! ```
 
 use aes_gcm::{
-    aead::{Aead, KeyInit},
     Aes256Gcm, Nonce,
+    aead::{Aead, KeyInit},
 };
-use base64::{engine::general_purpose::STANDARD as B64, Engine};
+use base64::{Engine, engine::general_purpose::STANDARD as B64};
 use rand::RngCore;
 use sha2::{Digest, Sha256};
 
@@ -80,8 +80,7 @@ fn derive_user_key(master_key: &[u8], user_id: &str) -> [u8; 32] {
 
 /// Get the master vault key from environment.
 fn get_master_key() -> Result<Vec<u8>, VaultError> {
-    let key_str = std::env::var("NEXUS_VAULT_KEY")
-        .map_err(|_| VaultError::KeyNotConfigured)?;
+    let key_str = std::env::var("NEXUS_VAULT_KEY").map_err(|_| VaultError::KeyNotConfigured)?;
     if key_str.len() < 32 {
         return Err(VaultError::KeyNotConfigured);
     }
@@ -92,8 +91,8 @@ fn get_master_key() -> Result<Vec<u8>, VaultError> {
 ///
 /// Returns: `vault:v1:<base64(nonce + ciphertext)>`
 fn encrypt_value(plaintext: &str, key: &[u8; 32]) -> Result<String, VaultError> {
-    let cipher = Aes256Gcm::new_from_slice(key)
-        .map_err(|e| VaultError::EncryptionFailed(e.to_string()))?;
+    let cipher =
+        Aes256Gcm::new_from_slice(key).map_err(|e| VaultError::EncryptionFailed(e.to_string()))?;
 
     let mut nonce_bytes = [0u8; 12];
     rand::thread_rng().fill_bytes(&mut nonce_bytes);
@@ -117,8 +116,7 @@ fn decrypt_value(encrypted: &str, key: &[u8; 32]) -> Result<String, VaultError> 
         .strip_prefix(ENCRYPTED_PREFIX)
         .ok_or(VaultError::InvalidFormat)?;
 
-    let combined = B64.decode(encoded)
-        .map_err(|_| VaultError::InvalidFormat)?;
+    let combined = B64.decode(encoded).map_err(|_| VaultError::InvalidFormat)?;
 
     if combined.len() < 13 {
         // Need at least 12-byte nonce + 1 byte ciphertext
@@ -128,12 +126,12 @@ fn decrypt_value(encrypted: &str, key: &[u8; 32]) -> Result<String, VaultError> 
     let (nonce_bytes, ciphertext) = combined.split_at(12);
     let nonce = Nonce::from_slice(nonce_bytes);
 
-    let cipher = Aes256Gcm::new_from_slice(key)
-        .map_err(|e| VaultError::DecryptionFailed(e.to_string()))?;
+    let cipher =
+        Aes256Gcm::new_from_slice(key).map_err(|e| VaultError::DecryptionFailed(e.to_string()))?;
 
-    let plaintext = cipher
-        .decrypt(nonce, ciphertext)
-        .map_err(|_| VaultError::DecryptionFailed("Decryption failed (wrong key or corrupted data)".into()))?;
+    let plaintext = cipher.decrypt(nonce, ciphertext).map_err(|_| {
+        VaultError::DecryptionFailed("Decryption failed (wrong key or corrupted data)".into())
+    })?;
 
     String::from_utf8(plaintext)
         .map_err(|_| VaultError::DecryptionFailed("Decrypted data is not valid UTF-8".into()))
@@ -151,10 +149,7 @@ pub fn is_encrypted(value: &str) -> bool {
 ///
 /// If `NEXUS_VAULT_KEY` is not set, returns the config unchanged
 /// (graceful degradation for dev environments).
-pub fn encrypt_source_config(
-    config: &serde_json::Value,
-    user_id: &str,
-) -> serde_json::Value {
+pub fn encrypt_source_config(config: &serde_json::Value, user_id: &str) -> serde_json::Value {
     let master_key = match get_master_key() {
         Ok(k) => k,
         Err(_) => {
@@ -336,7 +331,8 @@ mod tests {
             "database": "production",
             "collection": "sensors"
         });
-        let encrypted = encrypt_source_config_with_key(&config, "user_1", TEST_VAULT_KEY.as_bytes());
+        let encrypted =
+            encrypt_source_config_with_key(&config, "user_1", TEST_VAULT_KEY.as_bytes());
         let api_key = encrypted["api_key"].as_str().unwrap();
         assert!(is_encrypted(api_key));
         assert_eq!(encrypted["database"], "production");
@@ -350,10 +346,16 @@ mod tests {
             "connection_string": "postgres://user:pass@host/db",
             "database": "production"
         });
-        let encrypted = encrypt_source_config_with_key(&config, "user_1", TEST_VAULT_KEY.as_bytes());
-        let decrypted = decrypt_source_config_with_key(&encrypted, "user_1", TEST_VAULT_KEY.as_bytes()).unwrap();
+        let encrypted =
+            encrypt_source_config_with_key(&config, "user_1", TEST_VAULT_KEY.as_bytes());
+        let decrypted =
+            decrypt_source_config_with_key(&encrypted, "user_1", TEST_VAULT_KEY.as_bytes())
+                .unwrap();
         assert_eq!(decrypted["api_key"], "mongodb-key-123");
-        assert_eq!(decrypted["connection_string"], "postgres://user:pass@host/db");
+        assert_eq!(
+            decrypted["connection_string"],
+            "postgres://user:pass@host/db"
+        );
         assert_eq!(decrypted["database"], "production");
     }
 
@@ -373,8 +375,16 @@ mod tests {
             "database": "mydb"
         });
         let redacted = redact_source_config(&config);
-        assert_eq!(redacted["api_key"].as_str().unwrap(), "\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}");
-        assert!(redacted["connection_string"].as_str().unwrap().contains("\u{2022}"));
+        assert_eq!(
+            redacted["api_key"].as_str().unwrap(),
+            "\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}"
+        );
+        assert!(
+            redacted["connection_string"]
+                .as_str()
+                .unwrap()
+                .contains("\u{2022}")
+        );
         assert_eq!(redacted["database"], "mydb"); // non-sensitive, unchanged
     }
 
@@ -395,8 +405,10 @@ mod tests {
     #[test]
     fn already_encrypted_fields_are_not_re_encrypted() {
         let config = json!({ "api_key": "secret" });
-        let encrypted = encrypt_source_config_with_key(&config, "user_1", TEST_VAULT_KEY.as_bytes());
-        let double_encrypted = encrypt_source_config_with_key(&encrypted, "user_1", TEST_VAULT_KEY.as_bytes());
+        let encrypted =
+            encrypt_source_config_with_key(&config, "user_1", TEST_VAULT_KEY.as_bytes());
+        let double_encrypted =
+            encrypt_source_config_with_key(&encrypted, "user_1", TEST_VAULT_KEY.as_bytes());
         assert_eq!(encrypted["api_key"], double_encrypted["api_key"]);
     }
 

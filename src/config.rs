@@ -8,10 +8,10 @@
 // express or implied. Use at your own risk. AutomataNexus and the author assume
 // no liability for any damages arising from the use of this software.
 // ============================================================================
+use crate::email_guard::EmailGuardConfig;
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::Path;
-use serde::{Deserialize, Serialize};
-use crate::email_guard::EmailGuardConfig;
 
 /// Complete configuration for the Shield security engine.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -61,6 +61,15 @@ pub struct ShieldConfig {
     /// NexusPulse SMS alert integration.
     #[serde(default)]
     pub nexus_pulse: Option<NexusPulseConfig>,
+    /// Runtime allowlist CIDRs appended by the security-ticker + shield
+    /// agent. Loaded into NetworkMonitor's runtime_allowlist at startup
+    /// and appended to by `POST /endpoint/allowlist/cidr`. Persisted via
+    /// `toml_edit` so existing comments in config.toml are preserved.
+    #[serde(default)]
+    pub runtime_allowlist_cidrs: Vec<String>,
+    /// Runtime allowlist process comms, sibling to `runtime_allowlist_cidrs`.
+    #[serde(default)]
+    pub runtime_allowlist_processes: Vec<String>,
 }
 
 /// NexusPulse SMS alert configuration.
@@ -83,9 +92,15 @@ pub struct NexusPulseConfig {
     pub use_template: bool,
 }
 
-fn default_block_threshold() -> f64 { 0.7 }
-fn default_warn_threshold() -> f64 { 0.4 }
-fn default_audit_max() -> usize { 100_000 }
+fn default_block_threshold() -> f64 {
+    0.7
+}
+fn default_warn_threshold() -> f64 {
+    0.4
+}
+fn default_audit_max() -> usize {
+    100_000
+}
 
 /// Webhook alert configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -103,8 +118,12 @@ pub struct WebhookConfig {
     pub webhook_type: String,
 }
 
-fn default_webhook_min_severity() -> String { "high".to_string() }
-fn default_webhook_type() -> String { "generic".to_string() }
+fn default_webhook_min_severity() -> String {
+    "high".to_string()
+}
+fn default_webhook_type() -> String {
+    "generic".to_string()
+}
 
 /// Ferrum-Mail integration for email alerts.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -125,7 +144,9 @@ pub struct FerrumMailConfig {
     pub include_details: bool,
 }
 
-fn default_true() -> bool { true }
+fn default_true() -> bool {
+    true
+}
 
 /// Automatic signature update configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -140,8 +161,12 @@ pub struct SignatureUpdateConfig {
     pub auth_header: Option<String>,
 }
 
-fn default_sig_interval() -> u64 { 3600 }
-fn default_pulse_min_severity() -> String { "critical".to_string() }
+fn default_sig_interval() -> u64 {
+    3600
+}
+fn default_pulse_min_severity() -> String {
+    "critical".to_string()
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SqlFirewallConfig {
@@ -157,8 +182,12 @@ pub struct SqlFirewallConfig {
     pub blocked_schemas: Vec<String>,
 }
 
-fn default_max_query_length() -> usize { 10_000 }
-fn default_max_subquery_depth() -> u32 { 3 }
+fn default_max_query_length() -> usize {
+    10_000
+}
+fn default_max_subquery_depth() -> u32 {
+    3
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SsrfConfig {
@@ -180,9 +209,14 @@ pub struct SsrfConfig {
     pub blocked_ports: Vec<u16>,
 }
 
-fn default_allowed_schemes() -> Vec<String> { vec!["http".into(), "https".into()] }
+fn default_allowed_schemes() -> Vec<String> {
+    vec!["http".into(), "https".into()]
+}
 fn default_blocked_ports() -> Vec<u16> {
-    vec![22, 23, 25, 53, 111, 135, 139, 445, 514, 873, 2049, 3306, 5432, 6379, 6380, 9200, 9300, 11211, 27017, 27018, 50070]
+    vec![
+        22, 23, 25, 53, 111, 135, 139, 445, 514, 873, 2049, 3306, 5432, 6379, 6380, 9200, 9300,
+        11211, 27017, 27018, 50070,
+    ]
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -205,14 +239,30 @@ pub struct RateConfig {
     pub violation_decay_secs: u64,
 }
 
-fn default_rps() -> f64 { 50.0 }
-fn default_burst() -> f64 { 100.0 }
-fn default_warn_after() -> u32 { 3 }
-fn default_throttle_after() -> u32 { 8 }
-fn default_block_after() -> u32 { 15 }
-fn default_ban_after() -> u32 { 30 }
-fn default_ban_duration() -> u64 { 300 }
-fn default_decay() -> u64 { 60 }
+fn default_rps() -> f64 {
+    50.0
+}
+fn default_burst() -> f64 {
+    100.0
+}
+fn default_warn_after() -> u32 {
+    3
+}
+fn default_throttle_after() -> u32 {
+    8
+}
+fn default_block_after() -> u32 {
+    15
+}
+fn default_ban_after() -> u32 {
+    30
+}
+fn default_ban_duration() -> u64 {
+    300
+}
+fn default_decay() -> u64 {
+    60
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QuarantineConfig {
@@ -228,9 +278,15 @@ pub struct QuarantineConfig {
     pub check_embedded_scripts: bool,
 }
 
-fn default_max_rows() -> usize { 5_000_000 }
-fn default_max_size() -> usize { 500 * 1024 * 1024 }
-fn default_max_cols() -> usize { 500 }
+fn default_max_rows() -> usize {
+    5_000_000
+}
+fn default_max_size() -> usize {
+    500 * 1024 * 1024
+}
+fn default_max_cols() -> usize {
+    500
+}
 
 // === Default implementations ===
 
@@ -252,6 +308,8 @@ impl Default for ShieldConfig {
             ferrum_mail: None,
             signature_update: None,
             nexus_pulse: None,
+            runtime_allowlist_cidrs: Vec::new(),
+            runtime_allowlist_processes: Vec::new(),
         }
     }
 }

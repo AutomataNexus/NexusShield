@@ -22,15 +22,9 @@ use axum::response::Response;
 
 /// Axum middleware that enforces Bearer token authentication.
 /// If `expected_token` is None, all requests pass through (auth disabled).
-pub async fn auth_middleware(
-    request: Request,
-    next: Next,
-) -> Result<Response, StatusCode> {
+pub async fn auth_middleware(request: Request, next: Next) -> Result<Response, StatusCode> {
     // Get the expected token from the extension
-    let expected = request
-        .extensions()
-        .get::<AuthToken>()
-        .cloned();
+    let expected = request.extensions().get::<AuthToken>().cloned();
 
     let token = match expected {
         Some(AuthToken(Some(t))) => t,

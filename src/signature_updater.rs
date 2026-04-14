@@ -20,10 +20,15 @@ use std::time::Duration;
 use tokio::sync::watch;
 
 /// Start the signature update background task.
+///
+/// `signatures_path` is wrapped in `Arc` so the caller can retain a reference
+/// to the path being updated (e.g., to display the active signatures file in a
+/// status page) without duplicating the allocation.
+///
 /// Returns a shutdown sender to stop the task.
 pub fn start_updater(
     config: SignatureUpdateConfig,
-    signatures_path: std::path::PathBuf,
+    signatures_path: Arc<std::path::PathBuf>,
 ) -> (tokio::task::JoinHandle<()>, watch::Sender<bool>) {
     let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
 
@@ -71,12 +76,13 @@ pub fn start_updater(
 
                     if valid {
                         // Atomic write: write to temp, then rename
-                        let tmp_path = signatures_path.with_extension("ndjson.tmp");
+                        // Deref Arc<PathBuf> → PathBuf → Path for path operations
+                        let tmp_path = (**signatures_path).with_extension("ndjson.tmp");
                         if let Err(e) = std::fs::write(&tmp_path, &content) {
                             tracing::error!(error = %e, "Failed to write temp signature file");
                             continue;
                         }
-                        if let Err(e) = std::fs::rename(&tmp_path, &signatures_path) {
+                        if let Err(e) = std::fs::rename(&tmp_path, &**signatures_path) {
                             tracing::error!(error = %e, "Failed to rename signature file");
                             continue;
                         }
@@ -99,9 +105,8 @@ pub fn start_updater(
 
 /// Fetch signatures from the remote URL.
 async fn fetch_signatures(config: &SignatureUpdateConfig) -> Result<String, String> {
-    let client = hyper_util::client::legacy::Client::builder(
-        hyper_util::rt::TokioExecutor::new(),
-    ).build_http::<axum::body::Body>();
+    let client = hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new())
+        .build_http::<axum::body::Body>();
 
     let uri: hyper::Uri = config
         .feed_url
@@ -141,9 +146,12 @@ mod tests {
 
     #[test]
     fn validate_ndjson_good() {
-        let content = "{\"name\":\"test\",\"hash\":\"abc\"}\n{\"name\":\"test2\",\"hash\":\"def\"}\n";
+        let content =
+            "{\"name\":\"test\",\"hash\":\"abc\"}\n{\"name\":\"test2\",\"hash\":\"def\"}\n";
         for line in content.lines() {
-            if line.trim().is_empty() { continue; }
+            if line.trim().is_empty() {
+                continue;
+            }
             assert!(serde_json::from_str::<serde_json::Value>(line).is_ok());
         }
     }

@@ -215,11 +215,7 @@ impl AuditChain {
     }
 
     /// Count events by type since a given time.
-    pub fn count_since(
-        &self,
-        event_type: &SecurityEventType,
-        since: DateTime<Utc>,
-    ) -> usize {
+    pub fn count_since(&self, event_type: &SecurityEventType, since: DateTime<Utc>) -> usize {
         let events = self.events.read();
         let type_str = format!("{:?}", event_type);
         events
@@ -288,8 +284,18 @@ mod tests {
     fn multi_event_chain_is_valid() {
         let chain = AuditChain::new();
         chain.record(SecurityEventType::RequestAllowed, "1.2.3.4", "req 1", 0.1);
-        chain.record(SecurityEventType::RateLimitHit, "5.6.7.8", "rate limit", 0.8);
-        chain.record(SecurityEventType::SqlInjectionAttempt, "9.0.1.2", "union injection", 0.95);
+        chain.record(
+            SecurityEventType::RateLimitHit,
+            "5.6.7.8",
+            "rate limit",
+            0.8,
+        );
+        chain.record(
+            SecurityEventType::SqlInjectionAttempt,
+            "9.0.1.2",
+            "union injection",
+            0.95,
+        );
         let v = chain.verify_chain();
         assert!(v.valid);
         assert_eq!(v.total_events, 3);
@@ -316,7 +322,12 @@ mod tests {
     fn pruning_works() {
         let chain = AuditChain::with_max_events(5);
         for i in 0..10 {
-            chain.record(SecurityEventType::RequestAllowed, "1.2.3.4", &format!("req {i}"), 0.1);
+            chain.record(
+                SecurityEventType::RequestAllowed,
+                "1.2.3.4",
+                &format!("req {i}"),
+                0.1,
+            );
         }
         assert_eq!(chain.len(), 5);
     }

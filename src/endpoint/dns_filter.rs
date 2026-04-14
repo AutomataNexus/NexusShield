@@ -19,8 +19,8 @@ use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tokio::net::UdpSocket;
 
 // =============================================================================
@@ -55,9 +55,7 @@ impl Default for DnsFilterConfig {
             max_packet_size: 4096,
             log_all_queries: false,
             custom_blocklist: Vec::new(),
-            whitelist: vec![
-                "localhost".to_string(),
-            ],
+            whitelist: vec!["localhost".to_string()],
         }
     }
 }
@@ -309,6 +307,13 @@ impl DnsFilter {
 
     /// Handle a single DNS query: check, block, or forward.
     async fn handle_query(&self, query: &[u8]) -> Option<Vec<u8>> {
+        // Validate QR bit (bit 15 of flags): 0 = query, 1 = response.
+        // Drop responses that were mistakenly routed here.
+        let header = parse_dns_header(query)?;
+        if header.flags & 0x8000 != 0 {
+            return None;
+        }
+
         let domain = parse_query_domain(query)?;
         self.total_queries.fetch_add(1, Ordering::Relaxed);
 
@@ -350,8 +355,7 @@ impl DnsFilter {
             .map_err(|e| format!("failed to send to upstream: {}", e))?;
 
         let mut buf = vec![0u8; self.config.max_packet_size];
-        let timeout =
-            std::time::Duration::from_millis(self.config.upstream_timeout_ms);
+        let timeout = std::time::Duration::from_millis(self.config.upstream_timeout_ms);
 
         match tokio::time::timeout(timeout, socket.recv_from(&mut buf)).await {
             Ok(Ok((len, _))) => Ok(buf[..len].to_vec()),
@@ -414,10 +418,7 @@ impl DnsFilter {
                         DetectionCategory::NetworkAnomaly {
                             connection: format!("dns:{}", domain),
                         },
-                        format!(
-                            "DNS query blocked — {} is a known malicious domain",
-                            domain
-                        ),
+                        format!("DNS query blocked — {} is a known malicious domain", domain),
                         0.95,
                         RecommendedAction::BlockConnection {
                             addr: domain.clone(),
@@ -464,10 +465,8 @@ mod tests {
     fn test_filter() -> DnsFilter {
         let ti = test_threat_intel();
         let mut config = DnsFilterConfig::default();
-        config.custom_blocklist = vec![
-            "evil.example.com".to_string(),
-            "malware-c2.net".to_string(),
-        ];
+        config.custom_blocklist =
+            vec!["evil.example.com".to_string(), "malware-c2.net".to_string()];
         DnsFilter::new(config, ti)
     }
 
@@ -475,12 +474,16 @@ mod tests {
     fn parse_simple_domain() {
         // Build a minimal DNS query for "www.google.com"
         let mut packet = vec![0u8; 12]; // Header (all zeros)
-        packet[4] = 0; packet[5] = 1; // QD count = 1
+        packet[4] = 0;
+        packet[5] = 1; // QD count = 1
 
         // www.google.com
-        packet.push(3); packet.extend_from_slice(b"www");
-        packet.push(6); packet.extend_from_slice(b"google");
-        packet.push(3); packet.extend_from_slice(b"com");
+        packet.push(3);
+        packet.extend_from_slice(b"www");
+        packet.push(6);
+        packet.extend_from_slice(b"google");
+        packet.push(3);
+        packet.extend_from_slice(b"com");
         packet.push(0); // End of name
         packet.extend_from_slice(&[0, 1, 0, 1]); // Type A, Class IN
 
@@ -492,7 +495,8 @@ mod tests {
     fn parse_single_label() {
         let mut packet = vec![0u8; 12];
         packet[5] = 1;
-        packet.push(9); packet.extend_from_slice(b"localhost");
+        packet.push(9);
+        packet.extend_from_slice(b"localhost");
         packet.push(0);
         packet.extend_from_slice(&[0, 1, 0, 1]);
 
@@ -573,8 +577,10 @@ mod tests {
         query.extend_from_slice(&[0, 1, 0, 0, 0, 0, 0, 0]); // QD=1
 
         // test.com
-        query.push(4); query.extend_from_slice(b"test");
-        query.push(3); query.extend_from_slice(b"com");
+        query.push(4);
+        query.extend_from_slice(b"test");
+        query.push(3);
+        query.extend_from_slice(b"com");
         query.push(0);
         query.extend_from_slice(&[0, 1, 0, 1]);
 
@@ -591,8 +597,10 @@ mod tests {
         query.extend_from_slice(&[0x01, 0x00]); // Standard query
         query.extend_from_slice(&[0, 1, 0, 0, 0, 0, 0, 0]); // QD=1
 
-        query.push(4); query.extend_from_slice(b"evil");
-        query.push(3); query.extend_from_slice(b"com");
+        query.push(4);
+        query.extend_from_slice(b"evil");
+        query.push(3);
+        query.extend_from_slice(b"com");
         query.push(0);
         query.extend_from_slice(&[0, 1, 0, 1]);
 

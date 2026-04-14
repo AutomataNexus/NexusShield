@@ -14,15 +14,31 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Known rootkit kernel module names.
 const KNOWN_ROOTKIT_MODULES: &[&str] = &[
-    "diamorphine", "reptile", "bdvl", "suterusu", "adore-ng",
-    "knark", "rkkit", "heroin", "override", "modhide",
-    "enyelkm", "kbeast", "azazel", "jynx", "brootus",
-    "nurupo", "phalanx", "suckit", "synapsys", "khook",
+    "diamorphine",
+    "reptile",
+    "bdvl",
+    "suterusu",
+    "adore-ng",
+    "knark",
+    "rkkit",
+    "heroin",
+    "override",
+    "modhide",
+    "enyelkm",
+    "kbeast",
+    "azazel",
+    "jynx",
+    "brootus",
+    "nurupo",
+    "phalanx",
+    "suckit",
+    "synapsys",
+    "khook",
 ];
 
 /// Configuration for the rootkit detector.
@@ -80,9 +96,8 @@ impl RootkitDetector {
                 continue;
             }
 
-            let entries = std::fs::read_dir(dir).map_err(|e| {
-                format!("Cannot read {}: {}", dir.display(), e)
-            })?;
+            let entries = std::fs::read_dir(dir)
+                .map_err(|e| format!("Cannot read {}: {}", dir.display(), e))?;
 
             for entry in entries.flatten() {
                 let path = entry.path();
@@ -127,7 +142,10 @@ impl RootkitDetector {
                     DetectionCategory::RootkitIndicator {
                         technique: "binary_removed".to_string(),
                     },
-                    format!("System binary removed: {} — may indicate rootkit replacing binaries", path_str),
+                    format!(
+                        "System binary removed: {} — may indicate rootkit replacing binaries",
+                        path_str
+                    ),
                     0.6,
                     RecommendedAction::Alert,
                 ));
@@ -146,9 +164,7 @@ impl RootkitDetector {
                             },
                             format!(
                                 "System binary MODIFIED: {} — expected hash {:.16}…, got {:.16}…",
-                                path_str,
-                                expected_hash,
-                                current_hash,
+                                path_str, expected_hash, current_hash,
                             ),
                             0.95,
                             RecommendedAction::Alert,
@@ -164,7 +180,10 @@ impl RootkitDetector {
                         DetectionCategory::RootkitIndicator {
                             technique: "binary_unreadable".to_string(),
                         },
-                        format!("System binary unreadable: {} — permissions may have been modified", path_str),
+                        format!(
+                            "System binary unreadable: {} — permissions may have been modified",
+                            path_str
+                        ),
                         0.5,
                         RecommendedAction::Alert,
                     ));
@@ -452,8 +471,7 @@ impl RootkitDetector {
         let interval_secs = self.config.scan_interval_secs;
 
         tokio::spawn(async move {
-            let mut interval =
-                tokio::time::interval(std::time::Duration::from_secs(interval_secs));
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
 
             while running.load(Ordering::Relaxed) {
                 interval.tick().await;
@@ -491,7 +509,6 @@ fn compute_file_hash(path: &Path) -> std::io::Result<String> {
     }
     Ok(hex::encode(hasher.finalize()))
 }
-
 
 #[cfg(test)]
 mod tests {

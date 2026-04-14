@@ -52,6 +52,31 @@ impl DeveloperAllowlist {
             skip_paths: RwLock::new(Vec::new()),
             skip_processes: RwLock::new(HashSet::new()),
         };
+        // Always skip kernel pseudo-filesystems and other unscanable paths.
+        // These have effectively infinite file counts and recursive structures.
+        //
+        // Also skip known false-positive sources:
+        // - /var/lib/nexus-shield: our own scan outputs match our own YARA rules (self-reference)
+        // - /var/log: log files contain signature names from security tools themselves
+        // - /var/lib/apt/lists: Debian package metadata mentions miner names in descriptions
+        // - /var/lib/command-not-found: DB of installable commands includes miner package names
+        // - /var/mail, /var/spool: mail spool and queues (not executable content)
+        {
+            let mut paths = al.skip_paths.write();
+            for p in &[
+                "/proc", "/sys", "/dev", "/run", "/var/run", "/var/lock",
+                "/tmp", "/var/tmp", "/snap", "/var/lib/lxcfs", "/var/lib/snapd",
+                "/sys/kernel", "/sys/fs/cgroup",
+                "/var/lib/nexus-shield",
+                "/var/log",
+                "/var/lib/apt/lists",
+                "/var/lib/command-not-found",
+                "/var/mail",
+                "/var/spool",
+            ] {
+                paths.push((*p).to_string());
+            }
+        }
         if config.auto_detect {
             al.detect_dev_environments();
         }
@@ -87,7 +112,15 @@ impl DeveloperAllowlist {
         if home_path.join(".cargo/bin").exists() || home_path.join(".rustup").exists() {
             paths.push(".rustup".to_string());
             paths.push(".cargo/registry".to_string());
-            for name in &["rustc", "cargo", "rust-analyzer", "clippy-driver", "rustfmt", "cargo-clippy", "rustup"] {
+            for name in &[
+                "rustc",
+                "cargo",
+                "rust-analyzer",
+                "clippy-driver",
+                "rustfmt",
+                "cargo-clippy",
+                "rustup",
+            ] {
                 procs.insert(name.to_string());
             }
         }
@@ -103,7 +136,9 @@ impl DeveloperAllowlist {
             paths.push(".nvm".to_string());
             paths.push(".yarn".to_string());
             paths.push(".pnpm-store".to_string());
-            for name in &["node", "npm", "npx", "yarn", "pnpm", "bun", "deno", "tsx", "ts-node"] {
+            for name in &[
+                "node", "npm", "npx", "yarn", "pnpm", "bun", "deno", "tsx", "ts-node",
+            ] {
                 procs.insert(name.to_string());
             }
         }
@@ -118,7 +153,9 @@ impl DeveloperAllowlist {
             paths.push("venv".to_string());
             paths.push(".conda".to_string());
             paths.push(".local/lib/python".to_string());
-            for name in &["python", "python3", "pip", "pip3", "conda", "jupyter", "ipython", "poetry", "pdm"] {
+            for name in &[
+                "python", "python3", "pip", "pip3", "conda", "jupyter", "ipython", "poetry", "pdm",
+            ] {
                 procs.insert(name.to_string());
             }
         }
@@ -135,7 +172,16 @@ impl DeveloperAllowlist {
         // === Docker ===
         if Path::new("/usr/bin/docker").exists() || Path::new("/usr/local/bin/docker").exists() {
             paths.push("/var/lib/docker".to_string());
-            for name in &["docker", "dockerd", "containerd", "containerd-shim", "runc", "docker-compose", "podman", "buildah"] {
+            for name in &[
+                "docker",
+                "dockerd",
+                "containerd",
+                "containerd-shim",
+                "runc",
+                "docker-compose",
+                "podman",
+                "buildah",
+            ] {
                 procs.insert(name.to_string());
             }
         }
@@ -147,27 +193,44 @@ impl DeveloperAllowlist {
         {
             paths.push(".gradle".to_string());
             paths.push(".m2/repository".to_string());
-            for name in &["java", "javac", "gradle", "gradlew", "mvn", "mvnw", "kotlin", "kotlinc", "scala", "sbt"] {
+            for name in &[
+                "java", "javac", "gradle", "gradlew", "mvn", "mvnw", "kotlin", "kotlinc", "scala",
+                "sbt",
+            ] {
                 procs.insert(name.to_string());
             }
         }
 
         // === IDEs (always allow) ===
         for name in &[
-            "code", "code-server", "codium",
-            "idea", "idea64", "clion", "goland", "pycharm", "webstorm", "rider", "rustrover",
-            "vim", "nvim", "emacs", "nano", "helix", "zed",
-            "sublime_text", "atom",
+            "code",
+            "code-server",
+            "codium",
+            "idea",
+            "idea64",
+            "clion",
+            "goland",
+            "pycharm",
+            "webstorm",
+            "rider",
+            "rustrover",
+            "vim",
+            "nvim",
+            "emacs",
+            "nano",
+            "helix",
+            "zed",
+            "sublime_text",
+            "atom",
         ] {
             procs.insert(name.to_string());
         }
 
         // === Compilers & debuggers (always allow) ===
         for name in &[
-            "gcc", "g++", "cc", "c++", "clang", "clang++",
-            "make", "cmake", "ninja", "meson",
-            "gdb", "lldb", "strace", "ltrace", "perf", "valgrind",
-            "ld", "as", "ar", "nm", "objdump", "strip",
+            "gcc", "g++", "cc", "c++", "clang", "clang++", "make", "cmake", "ninja", "meson",
+            "gdb", "lldb", "strace", "ltrace", "perf", "valgrind", "ld", "as", "ar", "nm",
+            "objdump", "strip",
         ] {
             procs.insert(name.to_string());
         }
@@ -189,11 +252,11 @@ impl DeveloperAllowlist {
         // Extension-based skips — ONLY safe build artifacts, NOT executables
         // NOTE: .so, .a, .dylib are NOT skipped globally — they can contain malware.
         // They are only skipped when inside known dev paths (target/, .cargo/, node_modules/).
-        paths.push("*.rlib".to_string());  // Rust intermediate (never standalone)
+        paths.push("*.rlib".to_string()); // Rust intermediate (never standalone)
         paths.push("*.rmeta".to_string()); // Rust metadata (never standalone)
-        paths.push("*.d".to_string());     // Dependency files (text)
-        paths.push("*.pyc".to_string());   // Python bytecode
-        paths.push("*.pyo".to_string());   // Python optimized bytecode
+        paths.push("*.d".to_string()); // Dependency files (text)
+        paths.push("*.pyc".to_string()); // Python bytecode
+        paths.push("*.pyo".to_string()); // Python optimized bytecode
     }
 
     /// Check whether a file path should be skipped by scanners.
@@ -280,7 +343,9 @@ mod tests {
     #[test]
     fn node_modules_skipped() {
         let al = test_allowlist();
-        assert!(al.should_skip_path(Path::new("/home/user/project/node_modules/express/index.js")));
+        assert!(al.should_skip_path(Path::new(
+            "/home/user/project/node_modules/express/index.js"
+        )));
         assert!(al.should_skip_path(Path::new("/tmp/app/node_modules/.package-lock.json")));
     }
 
